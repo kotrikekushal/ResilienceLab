@@ -8,14 +8,7 @@ from backend.db.models.metric import MetricDB
 from backend.db.models.execution import ExecutionDB
 
 
-async def get_execution_details(
-    db: AsyncSession,
-    execution_id: UUID,
-) -> ExecutionDB:
-    """
-    Retrieve one execution together with its result and metrics.
-    """
-
+async def get_execution_details(db, execution_id):
     result = await db.execute(
         select(ExecutionDB)
         .options(
@@ -30,9 +23,7 @@ async def get_execution_details(
     execution = result.scalar_one_or_none()
 
     if execution is None:
-        raise ValueError(
-            "Execution not found"
-        )
+        raise ValueError("Execution not found")
 
     return execution
 
