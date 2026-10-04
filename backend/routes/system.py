@@ -3,7 +3,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from backend.db.models.user import UserDB
 from backend.db.models.system import SystemDB
 from backend.db.session import get_db
 from backend.models.system import (
@@ -11,6 +11,8 @@ from backend.models.system import (
     SystemResponse,
     SystemUpdate,
 )
+from backend.security.dependencies import get_current_user
+
 
 router = APIRouter(
     prefix="/systems",
@@ -26,13 +28,16 @@ router = APIRouter(
 async def create_system(
     data: SystemCreate,
     db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
 ):
     system = SystemDB(
         name=data.name,
         description=data.description,
+        user_id=current_user.id,
     )
 
     db.add(system)
+
     await db.commit()
     await db.refresh(system)
 
@@ -45,9 +50,12 @@ async def create_system(
 )
 async def get_systems(
     db: AsyncSession = Depends(get_db),
+    current_user:  UserDB = Depends(get_current_user),
 ):
     result = await db.execute(
-        select(SystemDB)
+        select(SystemDB).where(
+            SystemDB.user_id == current_user.id
+        )
     )
 
     systems = result.scalars().all()
@@ -62,9 +70,13 @@ async def get_systems(
 async def get_system(
     system_id: UUID,
     db: AsyncSession = Depends(get_db),
+    current_user:  UserDB = Depends(get_current_user),
 ):
     result = await db.execute(
-        select(SystemDB).where(SystemDB.id == system_id)
+        select(SystemDB).where(
+            SystemDB.id == system_id,
+            SystemDB.user_id == current_user.id,
+        )
     )
 
     system = result.scalar_one_or_none()
@@ -86,9 +98,13 @@ async def update_system(
     system_id: UUID,
     data: SystemUpdate,
     db: AsyncSession = Depends(get_db),
+    current_user:  UserDB = Depends(get_current_user),
 ):
     result = await db.execute(
-        select(SystemDB).where(SystemDB.id == system_id)
+        select(SystemDB).where(
+            SystemDB.id == system_id,
+            SystemDB.user_id == current_user.id,
+        )
     )
 
     system = result.scalar_one_or_none()
@@ -119,9 +135,13 @@ async def update_system(
 async def delete_system(
     system_id: UUID,
     db: AsyncSession = Depends(get_db),
+    current_user:  UserDB = Depends(get_current_user),
 ):
     result = await db.execute(
-        select(SystemDB).where(SystemDB.id == system_id)
+        select(SystemDB).where(
+            SystemDB.id == system_id,
+            SystemDB.user_id == current_user.id,
+        )
     )
 
     system = result.scalar_one_or_none()
