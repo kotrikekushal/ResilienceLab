@@ -1,7 +1,9 @@
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
-
+from sqlalchemy import ForeignKey
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy import DateTime, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -12,6 +14,7 @@ if TYPE_CHECKING:
     from .service import ServiceDB
     from .dependency import DependencyDB
     from .experiment import ExperimentDB
+    from backend.db.models.user import UserDB
 
 
 class SystemDB(Base):
@@ -47,6 +50,17 @@ class SystemDB(Base):
         nullable=False,
     )
 
+    user_id: Mapped[UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    user: Mapped["UserDB"] = relationship(
+        "UserDB",
+        back_populates="systems",
+    )
     # -----------------------------------------
     # Services
     # -----------------------------------------

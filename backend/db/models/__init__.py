@@ -7,3 +7,4 @@ from .failure import FailureDB
 from .metric import MetricDB
 from .result import ResultDB
 from .execution import ExecutionDB
+from .user import UserDB

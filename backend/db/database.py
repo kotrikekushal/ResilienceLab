@@ -13,6 +13,7 @@ from backend.db.models import (
     MetricDB,
     ResultDB,
     ExecutionDB,
+    UserDB,
 )
 
 
