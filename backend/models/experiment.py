@@ -17,7 +17,7 @@ class ExperimentUpdate(BaseModel):
     status: str | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
-    error_message: str | None
+    error_message: str | None  = None
 
 
 class ExperimentResponse(BaseModel):

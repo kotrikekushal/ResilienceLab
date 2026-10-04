@@ -3,11 +3,23 @@ import uuid
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
+
 from backend.main import app
 from backend.db.session import get_db
+
+from backend.db.models.user import UserDB
 from backend.db.models.system import SystemDB
 from backend.db.models.service import ServiceDB
 from backend.db.models.experiment import ExperimentDB
+
+from backend.security.password import hash_password
+from backend.security.jwt import create_access_token
+
+
+# ============================================================
+# DATABASE OVERRIDE
+# ============================================================
+
 
 @pytest.fixture
 def override_db(db_session):
@@ -15,28 +27,69 @@ def override_db(db_session):
         yield db_session
 
     app.dependency_overrides[get_db] = _get_db
+
     yield
+
     app.dependency_overrides.clear()
+
+
+# ============================================================
+# AUTH HELPERS
+# ============================================================
+
+
+async def create_test_user(db_session):
+    user = UserDB(
+        username=f"testuser_{uuid.uuid4().hex[:8]}",
+        email=f"test_{uuid.uuid4().hex[:8]}@example.com",
+        password_hash=hash_password("StrongPassword@123"),
+        is_active=True,
+    )
+
+    db_session.add(user)
+
+    await db_session.commit()
+    await db_session.refresh(user)
+
+    return user
+
+
+def get_auth_headers(user):
+    token = create_access_token(user.id)
+
+    return {
+        "Authorization": f"Bearer {token}",
+    }
 
 
 # ============================================================
 # HELPERS
 # ============================================================
 
-async def create_test_system(db_session):
+
+async def create_test_system(
+    db_session,
+    user,
+):
     system = SystemDB(
         name=f"Test System {uuid.uuid4()}",
         description="System for experiment tests",
+        user_id=user.id,
     )
 
     db_session.add(system)
+
     await db_session.commit()
     await db_session.refresh(system)
 
     return system.id
 
 
-async def create_test_service(db_session, system_id, name):
+async def create_test_service(
+    db_session,
+    system_id,
+    name,
+):
     service = ServiceDB(
         system_id=system_id,
         name=name,
@@ -46,13 +99,18 @@ async def create_test_service(db_session, system_id, name):
     )
 
     db_session.add(service)
+
     await db_session.commit()
     await db_session.refresh(service)
 
     return service.id
 
 
-async def create_test_experiment(client, system_id):
+async def create_test_experiment(
+    client,
+    system_id,
+    user,
+):
     response = await client.post(
         "/experiments/",
         json={
@@ -60,6 +118,7 @@ async def create_test_experiment(client, system_id):
             "name": "Test Experiment",
             "description": "Experiment for tests",
         },
+        headers=get_auth_headers(user),
     )
 
     assert response.status_code == 201
@@ -70,8 +129,12 @@ async def create_test_experiment(client, system_id):
 async def create_full_experiment(
     client,
     db_session,
+    user,
 ):
-    system_id = await create_test_system(db_session)
+    system_id = await create_test_system(
+        db_session,
+        user,
+    )
 
     service_id = await create_test_service(
         db_session,
@@ -82,6 +145,7 @@ async def create_full_experiment(
     experiment = await create_test_experiment(
         client,
         system_id,
+        user,
     )
 
     experiment_id = experiment["id"]
@@ -106,7 +170,7 @@ async def create_full_experiment(
             "failure_type": "latency",
             "duration_seconds": 5,
             "parameters": {
-                "delay_ms": 500
+                "delay_ms": 500,
             },
         },
     )
@@ -120,18 +184,22 @@ async def create_full_experiment(
 # CREATE EXPERIMENT
 # ============================================================
 
+
 @pytest.mark.asyncio
 async def test_create_experiment(
     db_session,
     override_db,
 ):
+    user = await create_test_user(db_session)
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
     ) as client:
 
         system_id = await create_test_system(
-            db_session
+            db_session,
+            user,
         )
 
         response = await client.post(
@@ -141,6 +209,7 @@ async def test_create_experiment(
                 "name": "Test Experiment",
                 "description": "Test description",
             },
+            headers=get_auth_headers(user),
         )
 
     assert response.status_code == 201
@@ -154,30 +223,130 @@ async def test_create_experiment(
 
 
 # ============================================================
-# GET ALL EXPERIMENTS
+# CREATE EXPERIMENT - SYSTEM NOT OWNED
 # ============================================================
 
+
 @pytest.mark.asyncio
-async def test_get_experiments(
+async def test_create_experiment_with_another_users_system(
     db_session,
     override_db,
 ):
+    owner = await create_test_user(db_session)
+    other_user = await create_test_user(db_session)
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
     ) as client:
 
         system_id = await create_test_system(
-            db_session
+            db_session,
+            owner,
+        )
+
+        response = await client.post(
+            "/experiments/",
+            json={
+                "system_id": str(system_id),
+                "name": "Unauthorized Experiment",
+                "description": "Should not be created",
+            },
+            headers=get_auth_headers(other_user),
+        )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "System not found"
+
+
+# ============================================================
+# GET ALL EXPERIMENTS
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_get_experiments(
+    db_session,
+    override_db,
+):
+    user = await create_test_user(db_session)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+
+        system_id = await create_test_system(
+            db_session,
+            user,
         )
 
         await create_test_experiment(
             client,
             system_id,
+            user,
         )
 
         response = await client.get(
-            "/experiments/"
+            "/experiments/",
+            headers=get_auth_headers(user),
+        )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert len(data) == 1
+    assert data[0]["name"] == "Test Experiment"
+
+
+# ============================================================
+# GET ALL EXPERIMENTS - USER ISOLATION
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_get_experiments_returns_only_current_users_experiments(
+    db_session,
+    override_db,
+):
+    user_a = await create_test_user(db_session)
+    user_b = await create_test_user(db_session)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+
+        system_a = await create_test_system(
+            db_session,
+            user_a,
+        )
+
+        system_b = await create_test_system(
+            db_session,
+            user_b,
+        )
+
+        await create_test_experiment(
+            client,
+            system_a,
+            user_a,
+        )
+
+        await client.post(
+            "/experiments/",
+            json={
+                "system_id": str(system_b),
+                "name": "User B Experiment",
+                "description": "Owned by B",
+            },
+            headers=get_auth_headers(user_b),
+        )
+
+        response = await client.get(
+            "/experiments/",
+            headers=get_auth_headers(user_a),
         )
 
     assert response.status_code == 200
@@ -192,29 +361,35 @@ async def test_get_experiments(
 # GET SINGLE EXPERIMENT
 # ============================================================
 
+
 @pytest.mark.asyncio
 async def test_get_experiment(
     db_session,
     override_db,
 ):
+    user = await create_test_user(db_session)
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
     ) as client:
 
         system_id = await create_test_system(
-            db_session
+            db_session,
+            user,
         )
 
         experiment = await create_test_experiment(
             client,
             system_id,
+            user,
         )
 
         experiment_id = experiment["id"]
 
         response = await client.get(
-            f"/experiments/{experiment_id}"
+            f"/experiments/{experiment_id}",
+            headers=get_auth_headers(user),
         )
 
     assert response.status_code == 200
@@ -229,11 +404,14 @@ async def test_get_experiment(
 # GET SINGLE EXPERIMENT - NOT FOUND
 # ============================================================
 
+
 @pytest.mark.asyncio
 async def test_get_experiment_not_found(
     db_session,
     override_db,
 ):
+    user = await create_test_user(db_session)
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
@@ -242,7 +420,46 @@ async def test_get_experiment_not_found(
         experiment_id = str(uuid.uuid4())
 
         response = await client.get(
-            f"/experiments/{experiment_id}"
+            f"/experiments/{experiment_id}",
+            headers=get_auth_headers(user),
+        )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Experiment not found"
+
+
+# ============================================================
+# GET SINGLE EXPERIMENT - OWNERSHIP
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_user_cannot_get_another_users_experiment(
+    db_session,
+    override_db,
+):
+    owner = await create_test_user(db_session)
+    other_user = await create_test_user(db_session)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+
+        system_id = await create_test_system(
+            db_session,
+            owner,
+        )
+
+        experiment = await create_test_experiment(
+            client,
+            system_id,
+            owner,
+        )
+
+        response = await client.get(
+            f"/experiments/{experiment['id']}",
+            headers=get_auth_headers(other_user),
         )
 
     assert response.status_code == 404
@@ -253,23 +470,28 @@ async def test_get_experiment_not_found(
 # UPDATE EXPERIMENT
 # ============================================================
 
+
 @pytest.mark.asyncio
 async def test_update_experiment(
     db_session,
     override_db,
 ):
+    user = await create_test_user(db_session)
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
     ) as client:
 
         system_id = await create_test_system(
-            db_session
+            db_session,
+            user,
         )
 
         experiment = await create_test_experiment(
             client,
             system_id,
+            user,
         )
 
         experiment_id = experiment["id"]
@@ -281,6 +503,7 @@ async def test_update_experiment(
                 "description": "Updated description",
                 "error_message": None,
             },
+            headers=get_auth_headers(user),
         )
 
     assert response.status_code == 200
@@ -295,11 +518,14 @@ async def test_update_experiment(
 # UPDATE EXPERIMENT - NOT FOUND
 # ============================================================
 
+
 @pytest.mark.asyncio
 async def test_update_experiment_not_found(
     db_session,
     override_db,
 ):
+    user = await create_test_user(db_session)
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
@@ -313,6 +539,48 @@ async def test_update_experiment_not_found(
                 "name": "Updated Experiment",
                 "error_message": None,
             },
+            headers=get_auth_headers(user),
+        )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Experiment not found"
+
+
+# ============================================================
+# UPDATE EXPERIMENT - OWNERSHIP
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_user_cannot_update_another_users_experiment(
+    db_session,
+    override_db,
+):
+    owner = await create_test_user(db_session)
+    other_user = await create_test_user(db_session)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+
+        system_id = await create_test_system(
+            db_session,
+            owner,
+        )
+
+        experiment = await create_test_experiment(
+            client,
+            system_id,
+            owner,
+        )
+
+        response = await client.patch(
+            f"/experiments/{experiment['id']}",
+            json={
+                "name": "Hacked Experiment",
+            },
+            headers=get_auth_headers(other_user),
         )
 
     assert response.status_code == 404
@@ -323,29 +591,35 @@ async def test_update_experiment_not_found(
 # DELETE EXPERIMENT
 # ============================================================
 
+
 @pytest.mark.asyncio
 async def test_delete_experiment(
     db_session,
     override_db,
 ):
+    user = await create_test_user(db_session)
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
     ) as client:
 
         system_id = await create_test_system(
-            db_session
+            db_session,
+            user,
         )
 
         experiment = await create_test_experiment(
             client,
             system_id,
+            user,
         )
 
         experiment_id = experiment["id"]
 
         response = await client.delete(
-            f"/experiments/{experiment_id}"
+            f"/experiments/{experiment_id}",
+            headers=get_auth_headers(user),
         )
 
     assert response.status_code == 204
@@ -355,11 +629,14 @@ async def test_delete_experiment(
 # DELETE EXPERIMENT - NOT FOUND
 # ============================================================
 
+
 @pytest.mark.asyncio
 async def test_delete_experiment_not_found(
     db_session,
     override_db,
 ):
+    user = await create_test_user(db_session)
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
@@ -368,7 +645,46 @@ async def test_delete_experiment_not_found(
         experiment_id = str(uuid.uuid4())
 
         response = await client.delete(
-            f"/experiments/{experiment_id}"
+            f"/experiments/{experiment_id}",
+            headers=get_auth_headers(user),
+        )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Experiment not found"
+
+
+# ============================================================
+# DELETE EXPERIMENT - OWNERSHIP
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_user_cannot_delete_another_users_experiment(
+    db_session,
+    override_db,
+):
+    owner = await create_test_user(db_session)
+    other_user = await create_test_user(db_session)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+
+        system_id = await create_test_system(
+            db_session,
+            owner,
+        )
+
+        experiment = await create_test_experiment(
+            client,
+            system_id,
+            owner,
+        )
+
+        response = await client.delete(
+            f"/experiments/{experiment['id']}",
+            headers=get_auth_headers(other_user),
         )
 
     assert response.status_code == 404
@@ -379,11 +695,14 @@ async def test_delete_experiment_not_found(
 # CLONE EXPERIMENT
 # ============================================================
 
+
 @pytest.mark.asyncio
 async def test_clone_experiment(
     db_session,
     override_db,
 ):
+    user = await create_test_user(db_session)
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
@@ -393,6 +712,7 @@ async def test_clone_experiment(
             await create_full_experiment(
                 client,
                 db_session,
+                user,
             )
         )
 
@@ -404,6 +724,7 @@ async def test_clone_experiment(
                 "name": "Cloned Experiment",
                 "description": "Cloned description",
             },
+            headers=get_auth_headers(user),
         )
 
     assert response.status_code == 201
@@ -431,11 +752,14 @@ async def test_clone_experiment(
 # CLONE EXPERIMENT - NOT FOUND
 # ============================================================
 
+
 @pytest.mark.asyncio
 async def test_clone_experiment_not_found(
     db_session,
     override_db,
 ):
+    user = await create_test_user(db_session)
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
@@ -446,8 +770,45 @@ async def test_clone_experiment_not_found(
         response = await client.post(
             f"/experiments/{experiment_id}/clone",
             json={
-                "name": "Cloned Experiment"
+                "name": "Cloned Experiment",
             },
+            headers=get_auth_headers(user),
+        )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Experiment not found"
+
+
+# ============================================================
+# CLONE EXPERIMENT - OWNERSHIP
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_user_cannot_clone_another_users_experiment(
+    db_session,
+    override_db,
+):
+    owner = await create_test_user(db_session)
+    other_user = await create_test_user(db_session)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+
+        source, _, _ = await create_full_experiment(
+            client,
+            db_session,
+            owner,
+        )
+
+        response = await client.post(
+            f"/experiments/{source['id']}/clone",
+            json={
+                "name": "Unauthorized Clone",
+            },
+            headers=get_auth_headers(other_user),
         )
 
     assert response.status_code == 404
@@ -458,11 +819,14 @@ async def test_clone_experiment_not_found(
 # REUSE EXPERIMENT
 # ============================================================
 
+
 @pytest.mark.asyncio
 async def test_reuse_experiment(
     db_session,
     override_db,
 ):
+    user = await create_test_user(db_session)
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
@@ -472,6 +836,7 @@ async def test_reuse_experiment(
             await create_full_experiment(
                 client,
                 db_session,
+                user,
             )
         )
 
@@ -493,11 +858,12 @@ async def test_reuse_experiment(
                         "failure_type": "error",
                         "duration_seconds": 8,
                         "parameters": {
-                            "error_rate": 50
+                            "error_rate": 50,
                         },
                     }
                 ],
             },
+            headers=get_auth_headers(user),
         )
 
     assert response.status_code == 201
@@ -524,11 +890,14 @@ async def test_reuse_experiment(
 # REUSE EXPERIMENT - NOT FOUND
 # ============================================================
 
+
 @pytest.mark.asyncio
 async def test_reuse_experiment_not_found(
     db_session,
     override_db,
 ):
+    user = await create_test_user(db_session)
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
@@ -539,8 +908,45 @@ async def test_reuse_experiment_not_found(
         response = await client.post(
             f"/experiments/{experiment_id}/reuse",
             json={
-                "name": "Reused Experiment"
+                "name": "Reused Experiment",
             },
+            headers=get_auth_headers(user),
+        )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Experiment not found"
+
+
+# ============================================================
+# REUSE EXPERIMENT - OWNERSHIP
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_user_cannot_reuse_another_users_experiment(
+    db_session,
+    override_db,
+):
+    owner = await create_test_user(db_session)
+    other_user = await create_test_user(db_session)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+
+        source, _, _ = await create_full_experiment(
+            client,
+            db_session,
+            owner,
+        )
+
+        response = await client.post(
+            f"/experiments/{source['id']}/reuse",
+            json={
+                "name": "Unauthorized Reuse",
+            },
+            headers=get_auth_headers(other_user),
         )
 
     assert response.status_code == 404
@@ -551,11 +957,14 @@ async def test_reuse_experiment_not_found(
 # GET EXPERIMENT CONFIGURATION
 # ============================================================
 
+
 @pytest.mark.asyncio
 async def test_get_experiment_configuration(
     db_session,
     override_db,
 ):
+    user = await create_test_user(db_session)
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
@@ -565,13 +974,15 @@ async def test_get_experiment_configuration(
             await create_full_experiment(
                 client,
                 db_session,
+                user,
             )
         )
 
         experiment_id = experiment["id"]
 
         response = await client.get(
-            f"/experiments/{experiment_id}/configuration"
+            f"/experiments/{experiment_id}/configuration",
+            headers=get_auth_headers(user),
         )
 
     assert response.status_code == 200
@@ -602,11 +1013,14 @@ async def test_get_experiment_configuration(
 # CONFIGURATION - NOT FOUND
 # ============================================================
 
+
 @pytest.mark.asyncio
 async def test_get_experiment_configuration_not_found(
     db_session,
     override_db,
 ):
+    user = await create_test_user(db_session)
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
@@ -615,7 +1029,41 @@ async def test_get_experiment_configuration_not_found(
         experiment_id = str(uuid.uuid4())
 
         response = await client.get(
-            f"/experiments/{experiment_id}/configuration"
+            f"/experiments/{experiment_id}/configuration",
+            headers=get_auth_headers(user),
+        )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Experiment not found"
+
+
+# ============================================================
+# CONFIGURATION - OWNERSHIP
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_user_cannot_get_another_users_configuration(
+    db_session,
+    override_db,
+):
+    owner = await create_test_user(db_session)
+    other_user = await create_test_user(db_session)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+
+        source, _, _ = await create_full_experiment(
+            client,
+            db_session,
+            owner,
+        )
+
+        response = await client.get(
+            f"/experiments/{source['id']}/configuration",
+            headers=get_auth_headers(other_user),
         )
 
     assert response.status_code == 404
@@ -626,29 +1074,35 @@ async def test_get_experiment_configuration_not_found(
 # CANCEL EXPERIMENT
 # ============================================================
 
+
 @pytest.mark.asyncio
 async def test_cancel_experiment(
     db_session,
     override_db,
 ):
+    user = await create_test_user(db_session)
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
     ) as client:
 
         system_id = await create_test_system(
-            db_session
+            db_session,
+            user,
         )
 
         experiment = await create_test_experiment(
             client,
             system_id,
+            user,
         )
 
         experiment_id = experiment["id"]
 
         response = await client.post(
-            f"/experiments/{experiment_id}/cancel"
+            f"/experiments/{experiment_id}/cancel",
+            headers=get_auth_headers(user),
         )
 
     assert response.status_code == 200
@@ -664,11 +1118,14 @@ async def test_cancel_experiment(
 # CANCEL - NOT FOUND
 # ============================================================
 
+
 @pytest.mark.asyncio
 async def test_cancel_experiment_not_found(
     db_session,
     override_db,
 ):
+    user = await create_test_user(db_session)
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
@@ -677,7 +1134,41 @@ async def test_cancel_experiment_not_found(
         experiment_id = str(uuid.uuid4())
 
         response = await client.post(
-            f"/experiments/{experiment_id}/cancel"
+            f"/experiments/{experiment_id}/cancel",
+            headers=get_auth_headers(user),
+        )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Experiment not found"
+
+
+# ============================================================
+# CANCEL - OWNERSHIP
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_user_cannot_cancel_another_users_experiment(
+    db_session,
+    override_db,
+):
+    owner = await create_test_user(db_session)
+    other_user = await create_test_user(db_session)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+
+        source, _, _ = await create_full_experiment(
+            client,
+            db_session,
+            owner,
+        )
+
+        response = await client.post(
+            f"/experiments/{source['id']}/cancel",
+            headers=get_auth_headers(other_user),
         )
 
     assert response.status_code == 404
@@ -688,30 +1179,34 @@ async def test_cancel_experiment_not_found(
 # CANCEL COMPLETED EXPERIMENT
 # ============================================================
 
+
 @pytest.mark.asyncio
 async def test_cancel_completed_experiment(
     db_session,
     override_db,
 ):
+    user = await create_test_user(db_session)
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
     ) as client:
 
         system_id = await create_test_system(
-            db_session
+            db_session,
+            user,
         )
 
         experiment = await create_test_experiment(
             client,
             system_id,
+            user,
         )
 
         experiment_id = uuid.UUID(
             experiment["id"]
         )
 
-        # Directly change state for testing
         result = await db_session.execute(
             select(ExperimentDB).where(
                 ExperimentDB.id == experiment_id
@@ -719,12 +1214,14 @@ async def test_cancel_completed_experiment(
         )
 
         db_experiment = result.scalar_one()
+
         db_experiment.status = "completed"
 
         await db_session.commit()
 
         response = await client.post(
-            f"/experiments/{experiment_id}/cancel"
+            f"/experiments/{experiment_id}/cancel",
+            headers=get_auth_headers(user),
         )
 
     assert response.status_code == 409
@@ -739,23 +1236,28 @@ async def test_cancel_completed_experiment(
 # CANCEL ALREADY REQUESTED
 # ============================================================
 
+
 @pytest.mark.asyncio
 async def test_cancel_already_requested(
     db_session,
     override_db,
 ):
+    user = await create_test_user(db_session)
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
     ) as client:
 
         system_id = await create_test_system(
-            db_session
+            db_session,
+            user,
         )
 
         experiment = await create_test_experiment(
             client,
             system_id,
+            user,
         )
 
         experiment_id = uuid.UUID(
@@ -769,12 +1271,14 @@ async def test_cancel_already_requested(
         )
 
         db_experiment = result.scalar_one()
+
         db_experiment.status = "cancel_requested"
 
         await db_session.commit()
 
         response = await client.post(
-            f"/experiments/{experiment_id}/cancel"
+            f"/experiments/{experiment_id}/cancel",
+            headers=get_auth_headers(user),
         )
 
     assert response.status_code == 409
@@ -783,3 +1287,25 @@ async def test_cancel_already_requested(
         response.json()["detail"]
         == "Experiment cancellation is already requested"
     )
+
+
+# ============================================================
+# AUTHENTICATION
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_experiment_requires_authentication(
+    db_session,
+    override_db,
+):
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+
+        response = await client.get(
+            "/experiments/"
+        )
+
+    assert response.status_code == 401

@@ -5,6 +5,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.models.experiment import ExperimentDB
+from backend.db.models.system import SystemDB
+from backend.db.models.user import UserDB
 from backend.db.session import get_db
 
 from backend.models.experiment import (
@@ -15,6 +17,8 @@ from backend.models.experiment import (
     ExperimentReuseRequest,
     ExperimentConfigurationResponse,
 )
+
+from backend.security.dependencies import get_current_user
 
 from backend.services.experiment_service import (
     clone_experiment,
@@ -30,6 +34,38 @@ router = APIRouter(
 
 
 # ============================================================
+# OWNERSHIP HELPER
+# ============================================================
+
+async def get_owned_experiment(
+    db: AsyncSession,
+    experiment_id: UUID,
+    user_id: UUID,
+) -> ExperimentDB:
+    result = await db.execute(
+        select(ExperimentDB)
+        .join(
+            SystemDB,
+            ExperimentDB.system_id == SystemDB.id,
+        )
+        .where(
+            ExperimentDB.id == experiment_id,
+            SystemDB.user_id == user_id,
+        )
+    )
+
+    experiment = result.scalar_one_or_none()
+
+    if experiment is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Experiment not found",
+        )
+
+    return experiment
+
+
+# ============================================================
 # CREATE EXPERIMENT
 # ============================================================
 
@@ -41,7 +77,24 @@ router = APIRouter(
 async def create_experiment(
     data: ExperimentCreate,
     db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
 ):
+    # Verify that the system belongs to the current user.
+    result = await db.execute(
+        select(SystemDB).where(
+            SystemDB.id == data.system_id,
+            SystemDB.user_id == current_user.id,
+        )
+    )
+
+    system = result.scalar_one_or_none()
+
+    if system is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="System not found",
+        )
+
     experiment = ExperimentDB(
         system_id=data.system_id,
         name=data.name,
@@ -66,9 +119,17 @@ async def create_experiment(
 )
 async def get_experiments(
     db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
 ):
     result = await db.execute(
         select(ExperimentDB)
+        .join(
+            SystemDB,
+            ExperimentDB.system_id == SystemDB.id,
+        )
+        .where(
+            SystemDB.user_id == current_user.id,
+        )
     )
 
     experiments = result.scalars().all()
@@ -89,7 +150,15 @@ async def clone_experiment_route(
     experiment_id: UUID,
     data: ExperimentCloneRequest,
     db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
 ):
+    # Verify ownership before calling the service.
+    await get_owned_experiment(
+        db=db,
+        experiment_id=experiment_id,
+        user_id=current_user.id,
+    )
+
     try:
         experiment = await clone_experiment(
             db=db,
@@ -120,7 +189,15 @@ async def reuse_experiment_route(
     experiment_id: UUID,
     data: ExperimentReuseRequest,
     db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
 ):
+    # Verify ownership before calling the service.
+    await get_owned_experiment(
+        db=db,
+        experiment_id=experiment_id,
+        user_id=current_user.id,
+    )
+
     try:
         experiment = await reuse_experiment(
             db=db,
@@ -151,7 +228,15 @@ async def reuse_experiment_route(
 async def get_experiment_configuration_route(
     experiment_id: UUID,
     db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
 ):
+    # Verify ownership before loading the full configuration.
+    await get_owned_experiment(
+        db=db,
+        experiment_id=experiment_id,
+        user_id=current_user.id,
+    )
+
     try:
         experiment = await get_experiment_configuration(
             db=db,
@@ -178,20 +263,13 @@ async def get_experiment_configuration_route(
 async def get_experiment(
     experiment_id: UUID,
     db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
 ):
-    result = await db.execute(
-        select(ExperimentDB).where(
-            ExperimentDB.id == experiment_id
-        )
+    experiment = await get_owned_experiment(
+        db=db,
+        experiment_id=experiment_id,
+        user_id=current_user.id,
     )
-
-    experiment = result.scalar_one_or_none()
-
-    if experiment is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Experiment not found",
-        )
 
     return experiment
 
@@ -208,20 +286,13 @@ async def update_experiment(
     experiment_id: UUID,
     data: ExperimentUpdate,
     db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
 ):
-    result = await db.execute(
-        select(ExperimentDB).where(
-            ExperimentDB.id == experiment_id
-        )
+    experiment = await get_owned_experiment(
+        db=db,
+        experiment_id=experiment_id,
+        user_id=current_user.id,
     )
-
-    experiment = result.scalar_one_or_none()
-
-    if experiment is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Experiment not found",
-        )
 
     update_data = data.model_dump(
         exclude_unset=True
@@ -247,43 +318,36 @@ async def update_experiment(
 async def delete_experiment(
     experiment_id: UUID,
     db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
 ):
-    result = await db.execute(
-        select(ExperimentDB).where(
-            ExperimentDB.id == experiment_id
-        )
+    experiment = await get_owned_experiment(
+        db=db,
+        experiment_id=experiment_id,
+        user_id=current_user.id,
     )
-
-    experiment = result.scalar_one_or_none()
-
-    if experiment is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Experiment not found",
-        )
 
     await db.delete(experiment)
 
     await db.commit()
 
-@router.post("/{experiment_id}/cancel")
+
+# ============================================================
+# CANCEL EXPERIMENT
+# ============================================================
+
+@router.post(
+    "/{experiment_id}/cancel",
+)
 async def cancel_experiment(
     experiment_id: UUID,
     db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
 ):
-    result = await db.execute(
-        select(ExperimentDB).where(
-            ExperimentDB.id == experiment_id
-        )
+    experiment = await get_owned_experiment(
+        db=db,
+        experiment_id=experiment_id,
+        user_id=current_user.id,
     )
-
-    experiment = result.scalar_one_or_none()
-
-    if experiment is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Experiment not found",
-        )
 
     if experiment.status in {
         "completed",
@@ -291,7 +355,7 @@ async def cancel_experiment(
         "cancelled",
     }:
         raise HTTPException(
-            status_code=409,
+            status_code=status.HTTP_409_CONFLICT,
             detail=(
                 f"Experiment cannot be cancelled "
                 f"because its current status is "
@@ -301,7 +365,7 @@ async def cancel_experiment(
 
     if experiment.status == "cancel_requested":
         raise HTTPException(
-            status_code=409,
+            status_code=status.HTTP_409_CONFLICT,
             detail="Experiment cancellation is already requested",
         )
 
