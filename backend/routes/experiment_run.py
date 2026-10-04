@@ -1,11 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
+from uuid import UUID
 import traceback
 
-from backend.db.session import get_db
-from celery.result import AsyncResult
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.celery_app import celery_app
+from backend.db.session import get_db
 
 from backend.db.models.system import SystemDB
 from backend.db.models.service import ServiceDB
@@ -14,22 +14,67 @@ from backend.db.models.experiment import ExperimentDB
 from backend.db.models.workload import WorkloadDB
 from backend.db.models.failure import FailureDB
 from backend.db.models.execution import ExecutionDB
+from backend.db.models.user import UserDB
 
 from backend.tasks import execute_experiment_task
 
 from backend.models.experiment_run import (
     ExperimentRunCreate,
-    ExperimentRunResponse,
     ExperimentQueuedResponse,
 )
 
-from sqlalchemy import select
+from backend.security.dependencies import get_current_user
 
 
 router = APIRouter(
     prefix="/experiments",
     tags=["Experiments"],
 )
+
+
+# ============================================================
+# OWNERSHIP HELPER
+# ============================================================
+
+async def get_owned_experiment(
+    db: AsyncSession,
+    experiment_id: UUID,
+    user_id: UUID,
+) -> ExperimentDB:
+    """
+    Return an experiment only when it belongs to the
+    authenticated user through its parent system.
+
+    Ownership path:
+
+        User
+          ↓
+        System
+          ↓
+        Experiment
+    """
+
+    result = await db.execute(
+        select(ExperimentDB)
+        .join(
+            SystemDB,
+            ExperimentDB.system_id == SystemDB.id,
+        )
+        .where(
+            ExperimentDB.id == experiment_id,
+            SystemDB.user_id == user_id,
+        )
+    )
+
+    experiment = result.scalar_one_or_none()
+
+    if experiment is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Experiment not found",
+        )
+
+    return experiment
 
 
 # ============================================================
@@ -43,6 +88,7 @@ router = APIRouter(
 async def run_experiment(
     data: ExperimentRunCreate,
     db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
 ):
     try:
 
@@ -51,6 +97,7 @@ async def run_experiment(
         # ====================================================
 
         system = SystemDB(
+            user_id=current_user.id,
             name=data.system.name,
             description=data.system.description,
         )
@@ -180,6 +227,7 @@ async def run_experiment(
         # ====================================================
 
         try:
+
             task = execute_experiment_task.delay(
                 str(experiment.id)
             )
@@ -197,7 +245,9 @@ async def run_experiment(
             )
 
             if failed_experiment is not None:
+
                 failed_experiment.status = "failed"
+
                 failed_experiment.error_message = (
                     f"Failed to queue experiment: {str(e)}"
                 )
@@ -205,7 +255,7 @@ async def run_experiment(
                 await db.commit()
 
             raise HTTPException(
-                status_code=503,
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Unable to queue experiment",
             )
 
@@ -239,7 +289,7 @@ async def run_experiment(
         )
 
         raise HTTPException(
-            status_code=500,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
                 "message": "Experiment creation failed",
                 "error_message": str(e),
@@ -256,17 +306,24 @@ async def run_experiment(
     response_model=ExperimentQueuedResponse,
 )
 async def rerun_experiment(
-    experiment_id: str,
+    experiment_id: UUID,
     db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
 ):
+
     # ========================================================
-    # 1. LOAD EXPERIMENT WITH ROW LOCK
+    # 1. LOAD ONLY USER'S EXPERIMENT WITH ROW LOCK
     # ========================================================
 
     result = await db.execute(
         select(ExperimentDB)
+        .join(
+            SystemDB,
+            ExperimentDB.system_id == SystemDB.id,
+        )
         .where(
-            ExperimentDB.id == experiment_id
+            ExperimentDB.id == experiment_id,
+            SystemDB.user_id == current_user.id,
         )
         .with_for_update()
     )
@@ -275,7 +332,7 @@ async def rerun_experiment(
 
     if experiment is None:
         raise HTTPException(
-            status_code=404,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail="Experiment not found",
         )
 
@@ -287,8 +344,9 @@ async def rerun_experiment(
         "queued",
         "running",
     }:
+
         raise HTTPException(
-            status_code=409,
+            status_code=status.HTTP_409_CONFLICT,
             detail=(
                 "Experiment is already queued "
                 "or running"
@@ -329,7 +387,9 @@ async def rerun_experiment(
         )
 
         if failed_experiment is not None:
+
             failed_experiment.status = "failed"
+
             failed_experiment.error_message = (
                 f"Failed to queue rerun: {str(e)}"
             )
@@ -337,7 +397,7 @@ async def rerun_experiment(
             await db.commit()
 
         raise HTTPException(
-            status_code=503,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Unable to queue experiment rerun",
         )
 
@@ -358,27 +418,29 @@ async def rerun_experiment(
 
 @router.get("/{experiment_id}/status")
 async def get_experiment_status(
-    experiment_id: str,
+    experiment_id: UUID,
     db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
 ):
-    result = await db.execute(
-        select(ExperimentDB).where(
-            ExperimentDB.id == experiment_id
-        )
+
+    # ========================================================
+    # 1. VERIFY OWNERSHIP
+    # ========================================================
+
+    experiment = await get_owned_experiment(
+        db=db,
+        experiment_id=experiment_id,
+        user_id=current_user.id,
     )
 
-    experiment = result.scalar_one_or_none()
-
-    if experiment is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Experiment not found",
-        )
+    # ========================================================
+    # 2. LOAD EXECUTIONS
+    # ========================================================
 
     result = await db.execute(
         select(ExecutionDB)
         .where(
-            ExecutionDB.experiment_id == experiment_id
+            ExecutionDB.experiment_id == experiment.id
         )
         .order_by(
             ExecutionDB.run_number
@@ -386,6 +448,10 @@ async def get_experiment_status(
     )
 
     executions = result.scalars().all()
+
+    # ========================================================
+    # 3. RETURN STATUS
+    # ========================================================
 
     return {
         "experiment_id": experiment.id,
@@ -403,47 +469,4 @@ async def get_experiment_status(
             }
             for execution in executions
         ],
-    }
-
-
-# ============================================================
-# GET CELERY TASK RESULT
-# ============================================================
-
-@router.get("/run/{task_id}")
-async def get_experiment_result(
-    task_id: str,
-):
-    task = AsyncResult(
-        task_id,
-        app=celery_app,
-    )
-
-    if task.state in {
-        "PENDING",
-        "STARTED",
-        "RETRY",
-    }:
-        return {
-            "task_id": task_id,
-            "status": "processing",
-        }
-
-    if task.state == "FAILURE":
-        return {
-            "task_id": task_id,
-            "status": "failed",
-            "error": str(task.result),
-        }
-
-    if task.state == "SUCCESS":
-        return {
-            "task_id": task_id,
-            "status": "completed",
-            "result": task.result,
-        }
-
-    return {
-        "task_id": task_id,
-        "status": task.state.lower(),
     }
