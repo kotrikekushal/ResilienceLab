@@ -1,21 +1,65 @@
 from uuid import UUID
-from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from pydantic import BaseModel, ConfigDict
-from backend.db.models.result import ResultDB
+
+from backend.db.models import (
+    ExecutionDB,
+    ExperimentDB,
+    ResultDB,
+    SystemDB,
+    UserDB,
+)
 from backend.db.session import get_db
 from backend.models.result import (
     ResultCreate,
     ResultResponse,
     ResultUpdate,
 )
+from backend.security.dependencies import get_current_user
+
 
 router = APIRouter(
     prefix="/results",
     tags=["Results"],
 )
+
+
+async def get_owned_result(
+    db: AsyncSession,
+    result_id: UUID,
+    user_id: UUID,
+) -> ResultDB:
+    query_result = await db.execute(
+        select(ResultDB)
+        .join(
+            ExecutionDB,
+            ResultDB.execution_id == ExecutionDB.id,
+        )
+        .join(
+            ExperimentDB,
+            ExecutionDB.experiment_id == ExperimentDB.id,
+        )
+        .join(
+            SystemDB,
+            ExperimentDB.system_id == SystemDB.id,
+        )
+        .where(
+            ResultDB.id == result_id,
+            SystemDB.user_id == user_id,
+        )
+    )
+
+    result = query_result.scalar_one_or_none()
+
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Result not found",
+        )
+
+    return result
 
 
 @router.post(
@@ -26,7 +70,32 @@ router = APIRouter(
 async def create_result(
     data: ResultCreate,
     db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
 ):
+    execution_result = await db.execute(
+        select(ExecutionDB)
+        .join(
+            ExperimentDB,
+            ExecutionDB.experiment_id == ExperimentDB.id,
+        )
+        .join(
+            SystemDB,
+            ExperimentDB.system_id == SystemDB.id,
+        )
+        .where(
+            ExecutionDB.id == data.execution_id,
+            SystemDB.user_id == current_user.id,
+        )
+    )
+
+    execution = execution_result.scalar_one_or_none()
+
+    if execution is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Execution not found",
+        )
+
     result = ResultDB(
         execution_id=data.execution_id,
         total_requests=data.total_requests,
@@ -55,9 +124,25 @@ async def create_result(
 )
 async def get_results(
     db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
 ):
     query_result = await db.execute(
         select(ResultDB)
+        .join(
+            ExecutionDB,
+            ResultDB.execution_id == ExecutionDB.id,
+        )
+        .join(
+            ExperimentDB,
+            ExecutionDB.experiment_id == ExperimentDB.id,
+        )
+        .join(
+            SystemDB,
+            ExperimentDB.system_id == SystemDB.id,
+        )
+        .where(
+            SystemDB.user_id == current_user.id,
+        )
     )
 
     results = query_result.scalars().all()
@@ -72,22 +157,13 @@ async def get_results(
 async def get_result(
     result_id: UUID,
     db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
 ):
-    query_result = await db.execute(
-        select(ResultDB).where(
-            ResultDB.id == result_id
-        )
+    return await get_owned_result(
+        db=db,
+        result_id=result_id,
+        user_id=current_user.id,
     )
-
-    result = query_result.scalar_one_or_none()
-
-    if result is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Result not found",
-        )
-
-    return result
 
 
 @router.patch(
@@ -98,24 +174,15 @@ async def update_result(
     result_id: UUID,
     data: ResultUpdate,
     db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
 ):
-    query_result = await db.execute(
-        select(ResultDB).where(
-            ResultDB.id == result_id
-        )
+    result = await get_owned_result(
+        db=db,
+        result_id=result_id,
+        user_id=current_user.id,
     )
 
-    result = query_result.scalar_one_or_none()
-
-    if result is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Result not found",
-        )
-
-    update_data = data.model_dump(
-        exclude_unset=True
-    )
+    update_data = data.model_dump(exclude_unset=True)
 
     for field, value in update_data.items():
         setattr(result, field, value)
@@ -133,20 +200,15 @@ async def update_result(
 async def delete_result(
     result_id: UUID,
     db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
 ):
-    query_result = await db.execute(
-        select(ResultDB).where(
-            ResultDB.id == result_id
-        )
+    result = await get_owned_result(
+        db=db,
+        result_id=result_id,
+        user_id=current_user.id,
     )
-
-    result = query_result.scalar_one_or_none()
-
-    if result is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Result not found",
-        )
 
     await db.delete(result)
     await db.commit()
+
+    return None

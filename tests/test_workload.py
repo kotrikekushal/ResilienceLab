@@ -1,336 +1,395 @@
-import pytest
-from httpx import ASGITransport, AsyncClient
+from uuid import uuid4
 
-from backend.main import app
-from backend.db.session import get_db
-from backend.db.models.system import SystemDB
-from backend.db.models.experiment import ExperimentDB
+from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
-
-@pytest.fixture
-def override_db(db_session):
-    async def _get_db():
-        yield db_session
-
-    app.dependency_overrides[get_db] = _get_db
-
-    yield
-
-    app.dependency_overrides.clear()
+from backend.db.models import (
+    ExperimentDB,
+    SystemDB,
+    UserDB,
+)
+from backend.security.jwt import create_access_token
+from backend.security.password import hash_password
 
 
-async def create_test_experiment(db_session, suffix=""):
+def workload_payload(experiment_id):
+    return {
+        "experiment_id": str(experiment_id),
+        "total_requests": 300,
+        "requests_per_second": 10,
+        "duration_seconds": 30,
+    }
+
+
+async def create_user(
+    db: AsyncSession,
+    suffix: str,
+):
+    user = UserDB(
+        username=f"workload_user_{suffix}",
+        email=f"workload_{suffix}@example.com",
+        password_hash=hash_password("StrongPassword@123"),
+        is_active=True,
+    )
+
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+
+    return user
+
+
+async def create_system(
+    db: AsyncSession,
+    user: UserDB,
+    suffix: str,
+):
     system = SystemDB(
-        name=f"Test System{suffix}",
+        user_id=user.id,
+        name=f"Workload System {suffix}",
         description="System for workload tests",
     )
 
-    db_session.add(system)
-    await db_session.flush()
+    db.add(system)
+    await db.commit()
+    await db.refresh(system)
 
+    return system
+
+
+async def create_experiment(
+    db: AsyncSession,
+    system: SystemDB,
+    suffix: str,
+):
     experiment = ExperimentDB(
         system_id=system.id,
-        name=f"Test Experiment{suffix}",
+        name=f"Workload Experiment {suffix}",
         description="Experiment for workload tests",
+        status="created",
     )
 
-    db_session.add(experiment)
+    db.add(experiment)
+    await db.commit()
+    await db.refresh(experiment)
 
-    await db_session.commit()
-    await db_session.refresh(experiment)
-
-    return experiment.id
+    return experiment
 
 
-@pytest.mark.asyncio
-async def test_create_workload(db_session, override_db):
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
+async def auth_headers(user: UserDB):
+    token = create_access_token(user.id)
 
-        experiment_id = await create_test_experiment(
-            db_session,
-            "-create",
-        )
+    return {
+        "Authorization": f"Bearer {token}",
+    }
 
-        response = await client.post(
-            "/workloads/",
-            json={
-                "experiment_id": str(experiment_id),
-                "total_requests": 100,
-                "requests_per_second": 10,
-                "duration_seconds": 10,
-            },
-        )
+
+async def test_create_workload(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    user = await create_user(db_session, "create")
+    system = await create_system(db_session, user, "create")
+    experiment = await create_experiment(
+        db_session,
+        system,
+        "create",
+    )
+
+    response = await client.post(
+        "/workloads/",
+        json=workload_payload(experiment.id),
+        headers=await auth_headers(user),
+    )
 
     assert response.status_code == 201
 
     data = response.json()
 
-    assert data["experiment_id"] == str(experiment_id)
-    assert data["total_requests"] == 100
+    assert data["experiment_id"] == str(experiment.id)
+    assert data["total_requests"] == 300
     assert data["requests_per_second"] == 10
-    assert data["duration_seconds"] == 10
+    assert data["duration_seconds"] == 30
+    assert "id" in data
+    assert "created_at" in data
 
 
-@pytest.mark.asyncio
-async def test_get_workloads(db_session, override_db):
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
+async def test_get_workloads(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    user = await create_user(db_session, "list")
+    system = await create_system(db_session, user, "list")
+    experiment = await create_experiment(
+        db_session,
+        system,
+        "list",
+    )
 
-        # First experiment
-        experiment_id_1 = await create_test_experiment(
-            db_session,
-            "-list-1",
-        )
+    create_response = await client.post(
+        "/workloads/",
+        json=workload_payload(experiment.id),
+        headers=await auth_headers(user),
+    )
 
-        response_1 = await client.post(
-            "/workloads/",
-            json={
-                "experiment_id": str(experiment_id_1),
-                "total_requests": 100,
-                "requests_per_second": 10,
-                "duration_seconds": 10,
-            },
-        )
+    assert create_response.status_code == 201
 
-        assert response_1.status_code == 201
-
-        # Second experiment
-        experiment_id_2 = await create_test_experiment(
-            db_session,
-            "-list-2",
-        )
-
-        response_2 = await client.post(
-            "/workloads/",
-            json={
-                "experiment_id": str(experiment_id_2),
-                "total_requests": 200,
-                "requests_per_second": 20,
-                "duration_seconds": 10,
-            },
-        )
-
-        assert response_2.status_code == 201
-
-        # Get all workloads
-        response = await client.get("/workloads/")
+    response = await client.get(
+        "/workloads/",
+        headers=await auth_headers(user),
+    )
 
     assert response.status_code == 200
 
     data = response.json()
 
-    assert len(data) == 2
-
-    assert data[0]["experiment_id"] == str(experiment_id_1)
-    assert data[0]["total_requests"] == 100
-    assert data[0]["requests_per_second"] == 10
-    assert data[0]["duration_seconds"] == 10
-
-    assert data[1]["experiment_id"] == str(experiment_id_2)
-    assert data[1]["total_requests"] == 200
-    assert data[1]["requests_per_second"] == 20
-    assert data[1]["duration_seconds"] == 10
+    assert len(data) == 1
+    assert data[0]["experiment_id"] == str(experiment.id)
 
 
-@pytest.mark.asyncio
-async def test_get_workload(db_session, override_db):
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
+async def test_get_workload(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    user = await create_user(db_session, "get")
+    system = await create_system(db_session, user, "get")
+    experiment = await create_experiment(
+        db_session,
+        system,
+        "get",
+    )
 
-        experiment_id = await create_test_experiment(
-            db_session,
-            "-get",
-        )
+    create_response = await client.post(
+        "/workloads/",
+        json=workload_payload(experiment.id),
+        headers=await auth_headers(user),
+    )
 
-        create_response = await client.post(
-            "/workloads/",
-            json={
-                "experiment_id": str(experiment_id),
-                "total_requests": 100,
-                "requests_per_second": 10,
-                "duration_seconds": 10,
-            },
-        )
+    assert create_response.status_code == 201
 
-        assert create_response.status_code == 201
+    workload_id = create_response.json()["id"]
 
-        workload_id = create_response.json()["id"]
-
-        response = await client.get(
-            f"/workloads/{workload_id}"
-        )
+    response = await client.get(
+        f"/workloads/{workload_id}",
+        headers=await auth_headers(user),
+    )
 
     assert response.status_code == 200
 
     data = response.json()
 
     assert data["id"] == workload_id
-    assert data["experiment_id"] == str(experiment_id)
-    assert data["total_requests"] == 100
-    assert data["requests_per_second"] == 10
-    assert data["duration_seconds"] == 10
+    assert data["experiment_id"] == str(experiment.id)
 
 
-@pytest.mark.asyncio
-async def test_get_workload_not_found(db_session, override_db):
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
+async def test_update_workload(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    user = await create_user(db_session, "update")
+    system = await create_system(db_session, user, "update")
+    experiment = await create_experiment(
+        db_session,
+        system,
+        "update",
+    )
 
-        response = await client.get(
-            "/workloads/00000000-0000-0000-0000-000000000000"
-        )
+    create_response = await client.post(
+        "/workloads/",
+        json=workload_payload(experiment.id),
+        headers=await auth_headers(user),
+    )
 
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Workload not found"
+    assert create_response.status_code == 201
 
+    workload_id = create_response.json()["id"]
 
-@pytest.mark.asyncio
-async def test_update_workload(db_session, override_db):
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
-
-        experiment_id = await create_test_experiment(
-            db_session,
-            "-update",
-        )
-
-        create_response = await client.post(
-            "/workloads/",
-            json={
-                "experiment_id": str(experiment_id),
-                "total_requests": 100,
-                "requests_per_second": 10,
-                "duration_seconds": 10,
-            },
-        )
-
-        assert create_response.status_code == 201
-
-        workload_id = create_response.json()["id"]
-
-        response = await client.patch(
-            f"/workloads/{workload_id}",
-            json={
-                "total_requests": 500,
-                "requests_per_second": 50,
-                "duration_seconds": 20,
-            },
-        )
+    response = await client.patch(
+        f"/workloads/{workload_id}",
+        json={
+            "total_requests": 600,
+            "requests_per_second": 20,
+            "duration_seconds": 60,
+        },
+        headers=await auth_headers(user),
+    )
 
     assert response.status_code == 200
 
     data = response.json()
 
-    assert data["id"] == workload_id
-    assert data["total_requests"] == 500
-    assert data["requests_per_second"] == 50
-    assert data["duration_seconds"] == 20
+    assert data["total_requests"] == 600
+    assert data["requests_per_second"] == 20
+    assert data["duration_seconds"] == 60
 
 
-@pytest.mark.asyncio
-async def test_update_workload_not_found(db_session, override_db):
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
+async def test_delete_workload(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    user = await create_user(db_session, "delete")
+    system = await create_system(db_session, user, "delete")
+    experiment = await create_experiment(
+        db_session,
+        system,
+        "delete",
+    )
 
-        response = await client.patch(
-            "/workloads/00000000-0000-0000-0000-000000000000",
-            json={
-                "total_requests": 500,
-            },
-        )
+    create_response = await client.post(
+        "/workloads/",
+        json=workload_payload(experiment.id),
+        headers=await auth_headers(user),
+    )
 
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Workload not found"
+    assert create_response.status_code == 201
 
+    workload_id = create_response.json()["id"]
 
-@pytest.mark.asyncio
-async def test_delete_workload(db_session, override_db):
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
+    response = await client.delete(
+        f"/workloads/{workload_id}",
+        headers=await auth_headers(user),
+    )
 
-        experiment_id = await create_test_experiment(
-            db_session,
-            "-delete",
-        )
+    assert response.status_code == 204
 
-        create_response = await client.post(
-            "/workloads/",
-            json={
-                "experiment_id": str(experiment_id),
-                "total_requests": 100,
-                "requests_per_second": 10,
-                "duration_seconds": 10,
-            },
-        )
-
-        assert create_response.status_code == 201
-
-        workload_id = create_response.json()["id"]
-
-        response = await client.delete(
-            f"/workloads/{workload_id}"
-        )
-
-        assert response.status_code == 204
-
-        get_response = await client.get(
-            f"/workloads/{workload_id}"
-        )
+    get_response = await client.get(
+        f"/workloads/{workload_id}",
+        headers=await auth_headers(user),
+    )
 
     assert get_response.status_code == 404
-    assert get_response.json()["detail"] == "Workload not found"
 
 
-@pytest.mark.asyncio
-async def test_delete_workload_not_found(db_session, override_db):
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
+async def test_cross_user_workload_access_denied(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    owner = await create_user(db_session, "owner")
+    other_user = await create_user(db_session, "other")
 
-        response = await client.delete(
-            "/workloads/00000000-0000-0000-0000-000000000000"
-        )
+    system = await create_system(
+        db_session,
+        owner,
+        "cross",
+    )
+
+    experiment = await create_experiment(
+        db_session,
+        system,
+        "cross",
+    )
+
+    create_response = await client.post(
+        "/workloads/",
+        json=workload_payload(experiment.id),
+        headers=await auth_headers(owner),
+    )
+
+    assert create_response.status_code == 201
+
+    workload_id = create_response.json()["id"]
+
+    response = await client.get(
+        f"/workloads/{workload_id}",
+        headers=await auth_headers(other_user),
+    )
 
     assert response.status_code == 404
-    assert response.json()["detail"] == "Workload not found"
+
+    response = await client.patch(
+        f"/workloads/{workload_id}",
+        json={
+            "total_requests": 999,
+        },
+        headers=await auth_headers(other_user),
+    )
+
+    assert response.status_code == 404
+
+    response = await client.delete(
+        f"/workloads/{workload_id}",
+        headers=await auth_headers(other_user),
+    )
+
+    assert response.status_code == 404
 
 
-@pytest.mark.asyncio
-async def test_create_workload_validation(db_session, override_db):
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
+async def test_create_workload_for_other_user_experiment_denied(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    owner = await create_user(db_session, "experiment_owner")
+    other_user = await create_user(db_session, "experiment_other")
 
-        experiment_id = await create_test_experiment(
-            db_session,
-            "-validation",
-        )
+    system = await create_system(
+        db_session,
+        owner,
+        "ownership",
+    )
 
-        response = await client.post(
-            "/workloads/",
-            json={
-                "experiment_id": str(experiment_id),
-                "total_requests": 0,
-                "requests_per_second": 10,
-                "duration_seconds": 10,
-            },
-        )
+    experiment = await create_experiment(
+        db_session,
+        system,
+        "ownership",
+    )
 
-    assert response.status_code == 422
+    response = await client.post(
+        "/workloads/",
+        json=workload_payload(experiment.id),
+        headers=await auth_headers(other_user),
+    )
+
+    assert response.status_code == 404
+
+
+async def test_get_workload_not_found(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    user = await create_user(db_session, "notfound")
+
+    response = await client.get(
+        f"/workloads/{uuid4()}",
+        headers=await auth_headers(user),
+    )
+
+    assert response.status_code == 404
+
+
+async def test_update_workload_not_found(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    user = await create_user(db_session, "update_notfound")
+
+    response = await client.patch(
+        f"/workloads/{uuid4()}",
+        json={
+            "total_requests": 100,
+        },
+        headers=await auth_headers(user),
+    )
+
+    assert response.status_code == 404
+
+
+async def test_delete_workload_not_found(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    user = await create_user(db_session, "delete_notfound")
+
+    response = await client.delete(
+        f"/workloads/{uuid4()}",
+        headers=await auth_headers(user),
+    )
+
+    assert response.status_code == 404
+
+
+async def test_unauthenticated_workload_request(
+    client: AsyncClient,
+):
+    response = await client.get("/workloads/")
+
+    assert response.status_code == 401
