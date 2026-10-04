@@ -4,19 +4,52 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.db.models.service import ServiceDB
+from backend.db.models import (
+    ServiceDB,
+    SystemDB,
+    UserDB,
+)
 from backend.db.session import get_db
 from backend.models.service import (
     ServiceCreate,
     ServiceResponse,
     ServiceUpdate,
 )
+from backend.security.dependencies import get_current_user
 
 
 router = APIRouter(
     prefix="/services",
     tags=["Services"],
 )
+
+
+async def get_owned_service(
+    db: AsyncSession,
+    service_id: UUID,
+    user_id: UUID,
+) -> ServiceDB:
+    result = await db.execute(
+        select(ServiceDB)
+        .join(
+            SystemDB,
+            ServiceDB.system_id == SystemDB.id,
+        )
+        .where(
+            ServiceDB.id == service_id,
+            SystemDB.user_id == user_id,
+        )
+    )
+
+    service = result.scalar_one_or_none()
+
+    if service is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Service not found",
+        )
+
+    return service
 
 
 @router.post(
@@ -27,17 +60,29 @@ router = APIRouter(
 async def create_service(
     data: ServiceCreate,
     db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
 ):
+    system_result = await db.execute(
+        select(SystemDB).where(
+            SystemDB.id == data.system_id,
+            SystemDB.user_id == current_user.id,
+        )
+    )
+
+    system = system_result.scalar_one_or_none()
+
+    if system is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="System not found",
+        )
+
     service = ServiceDB(
         system_id=data.system_id,
         name=data.name,
         description=data.description,
         base_url=data.base_url,
-        docker_container_name=getattr(
-            data,
-            "docker_container_name",
-            None,
-        ),
+        docker_container_name=data.docker_container_name,
     )
 
     db.add(service)
@@ -54,9 +99,17 @@ async def create_service(
 )
 async def get_services(
     db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
 ):
     result = await db.execute(
         select(ServiceDB)
+        .join(
+            SystemDB,
+            ServiceDB.system_id == SystemDB.id,
+        )
+        .where(
+            SystemDB.user_id == current_user.id,
+        )
     )
 
     services = result.scalars().all()
@@ -71,22 +124,13 @@ async def get_services(
 async def get_service(
     service_id: UUID,
     db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
 ):
-    result = await db.execute(
-        select(ServiceDB).where(
-            ServiceDB.id == service_id
-        )
+    return await get_owned_service(
+        db=db,
+        service_id=service_id,
+        user_id=current_user.id,
     )
-
-    service = result.scalar_one_or_none()
-
-    if service is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found",
-        )
-
-    return service
 
 
 @router.patch(
@@ -97,20 +141,13 @@ async def update_service(
     service_id: UUID,
     data: ServiceUpdate,
     db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
 ):
-    result = await db.execute(
-        select(ServiceDB).where(
-            ServiceDB.id == service_id
-        )
+    service = await get_owned_service(
+        db=db,
+        service_id=service_id,
+        user_id=current_user.id,
     )
-
-    service = result.scalar_one_or_none()
-
-    if service is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found",
-        )
 
     update_data = data.model_dump(
         exclude_unset=True
@@ -132,21 +169,16 @@ async def update_service(
 async def delete_service(
     service_id: UUID,
     db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
 ):
-    result = await db.execute(
-        select(ServiceDB).where(
-            ServiceDB.id == service_id
-        )
+    service = await get_owned_service(
+        db=db,
+        service_id=service_id,
+        user_id=current_user.id,
     )
-
-    service = result.scalar_one_or_none()
-
-    if service is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found",
-        )
 
     await db.delete(service)
 
     await db.commit()
+
+    return None
