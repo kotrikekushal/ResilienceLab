@@ -2,7 +2,11 @@ import pytest
 
 from backend.models.auth import UserRegister
 from backend.services.auth_service import create_user
-
+from backend.models.auth import UserRegister, LoginRequest
+from backend.services.auth_service import (
+    create_user,
+    authenticate_user,
+)
 
 @pytest.mark.asyncio
 async def test_create_user(db_session):
@@ -81,4 +85,101 @@ async def test_create_user_rejects_duplicate_email(db_session):
         await create_user(
             db=db_session,
             user_data=second_user,
+        )
+
+@pytest.mark.asyncio
+async def test_authenticate_user_with_username(db_session):
+    user_data = UserRegister(
+        username="loginuser",
+        email="login@example.com",
+        password="StrongPassword@123",
+    )
+
+    await create_user(
+        db=db_session,
+        user_data=user_data,
+    )
+
+    login_data = LoginRequest(
+        username="loginuser",
+        password="StrongPassword@123",
+    )
+
+    user = await authenticate_user(
+        db=db_session,
+        login_data=login_data,
+    )
+
+    assert user.username == "loginuser"
+    assert user.email == "login@example.com"
+
+
+@pytest.mark.asyncio
+async def test_authenticate_user_with_email(db_session):
+    user_data = UserRegister(
+        username="emailuser",
+        email="email@example.com",
+        password="StrongPassword@123",
+    )
+
+    await create_user(
+        db=db_session,
+        user_data=user_data,
+    )
+
+    login_data = LoginRequest(
+        username="email@example.com",
+        password="StrongPassword@123",
+    )
+
+    user = await authenticate_user(
+        db=db_session,
+        login_data=login_data,
+    )
+
+    assert user.username == "emailuser"
+
+
+@pytest.mark.asyncio
+async def test_authenticate_user_rejects_wrong_password(db_session):
+    user_data = UserRegister(
+        username="wrongpassuser",
+        email="wrongpass@example.com",
+        password="StrongPassword@123",
+    )
+
+    await create_user(
+        db=db_session,
+        user_data=user_data,
+    )
+
+    login_data = LoginRequest(
+        username="wrongpassuser",
+        password="WrongPassword@123",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Invalid username or password",
+    ):
+        await authenticate_user(
+            db=db_session,
+            login_data=login_data,
+        )
+
+
+@pytest.mark.asyncio
+async def test_authenticate_user_rejects_unknown_user(db_session):
+    login_data = LoginRequest(
+        username="doesnotexist",
+        password="StrongPassword@123",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Invalid username or password",
+    ):
+        await authenticate_user(
+            db=db_session,
+            login_data=login_data,
         )

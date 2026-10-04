@@ -10,6 +10,7 @@ from backend.routes.metric import router as metric_router
 from backend.routes.result import router as result_router
 from backend.routes.experiment_run import router as experiment_run_router
 from backend.routes.execution import router as execution_router
+from backend.routes.auth import router as auth_router
 
 app = FastAPI()
 
@@ -23,6 +24,7 @@ app.include_router(metric_router)
 app.include_router(result_router)
 app.include_router(experiment_run_router)
 app.include_router(execution_router)
+app.include_router(auth_router)
 
 @app.on_event("startup")
 async def startup():
