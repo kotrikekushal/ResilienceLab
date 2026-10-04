@@ -3,6 +3,9 @@ from httpx import ASGITransport, AsyncClient
 
 from backend.main import app
 from backend.db.session import get_db
+from backend.db.models.user import UserDB
+from backend.security.password import hash_password
+from backend.security.jwt import create_access_token
 
 
 @pytest.fixture
@@ -17,46 +20,78 @@ def override_db(db_session):
     app.dependency_overrides.clear()
 
 
-async def create_test_services(client):
-    # Create system
+async def create_test_user(
+    db_session,
+    suffix="1",
+):
+    user = UserDB(
+        username=f"dependency_user_{suffix}",
+        email=f"dependency_{suffix}@example.com",
+        password_hash=hash_password("StrongPassword@123"),
+        is_active=True,
+    )
+
+    db_session.add(user)
+    await db_session.commit()
+    await db_session.refresh(user)
+
+    return user
+
+
+def auth_headers(user):
+    token = create_access_token(user.id)
+
+    return {
+        "Authorization": f"Bearer {token}",
+    }
+
+
+async def create_test_services(
+    client,
+    user,
+    system_name="Test System",
+    source_name="Source Service",
+    target_name="Target Service",
+):
     system_response = await client.post(
         "/systems/",
         json={
-            "name": "Test System",
+            "name": system_name,
             "description": "System for dependency tests",
         },
+        headers=auth_headers(user),
     )
 
     assert system_response.status_code == 201
 
     system_id = system_response.json()["id"]
 
-    # Create source service
     source_response = await client.post(
         "/services/",
         json={
             "system_id": system_id,
-            "name": "Source Service",
+            "name": source_name,
             "description": "Source service",
             "base_url": "http://source-service:8000",
             "docker_container_name": "source-service",
         },
+        headers=auth_headers(user),
     )
 
     assert source_response.status_code == 201
 
     source_service_id = source_response.json()["id"]
 
-    # Create target service
     target_response = await client.post(
         "/services/",
         json={
             "system_id": system_id,
-            "name": "Target Service",
+            "name": target_name,
             "description": "Target service",
             "base_url": "http://target-service:8000",
             "docker_container_name": "target-service",
         },
+        headers=auth_headers(user),
     )
 
     assert target_response.status_code == 201
@@ -66,15 +101,48 @@ async def create_test_services(client):
     return source_service_id, target_service_id
 
 
+async def create_dependency(
+    client,
+    source_service_id,
+    target_service_id,
+    user,
+    dependency_type="HTTP",
+):
+    response = await client.post(
+        "/dependencies/",
+        json={
+            "source_service_id": source_service_id,
+            "target_service_id": target_service_id,
+            "dependency_type": dependency_type,
+        },
+        headers=auth_headers(user),
+    )
+
+    assert response.status_code == 201
+
+    return response.json()
+
+
 @pytest.mark.asyncio
-async def test_create_dependency(db_session, override_db):
+async def test_create_dependency(
+    db_session,
+    override_db,
+):
+    user = await create_test_user(
+        db_session,
+        "create",
+    )
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
     ) as client:
 
         source_service_id, target_service_id = (
-            await create_test_services(client)
+            await create_test_services(
+                client,
+                user,
+            )
         )
 
         response = await client.post(
@@ -84,6 +152,7 @@ async def test_create_dependency(db_session, override_db):
                 "target_service_id": target_service_id,
                 "dependency_type": "HTTP",
             },
+            headers=auth_headers(user),
         )
 
     assert response.status_code == 201
@@ -98,82 +167,57 @@ async def test_create_dependency(db_session, override_db):
 
 
 @pytest.mark.asyncio
-async def test_get_dependencies(db_session, override_db):
+async def test_get_dependencies(
+    db_session,
+    override_db,
+):
+    user = await create_test_user(
+        db_session,
+        "list",
+    )
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
     ) as client:
 
         source_service_id, target_service_id = (
-            await create_test_services(client)
+            await create_test_services(
+                client,
+                user,
+            )
         )
 
-        # Create first dependency
-        response_1 = await client.post(
+        await create_dependency(
+            client,
+            source_service_id,
+            target_service_id,
+            user,
+            "HTTP",
+        )
+
+        second_source_id, second_target_id = (
+            await create_test_services(
+                client,
+                user,
+                system_name="Second Test System",
+                source_name="Second Source",
+                target_name="Second Target",
+            )
+        )
+
+        await create_dependency(
+            client,
+            second_source_id,
+            second_target_id,
+            user,
+            "DATABASE",
+        )
+
+        response = await client.get(
             "/dependencies/",
-            json={
-                "source_service_id": source_service_id,
-                "target_service_id": target_service_id,
-                "dependency_type": "HTTP",
-            },
+            headers=auth_headers(user),
         )
-
-        assert response_1.status_code == 201
-
-        # Create another system and services
-        system_response = await client.post(
-            "/systems/",
-            json={
-                "name": "Second Test System",
-                "description": "Second system",
-            },
-        )
-
-        assert system_response.status_code == 201
-
-        system_id = system_response.json()["id"]
-
-        source_response = await client.post(
-            "/services/",
-            json={
-                "system_id": system_id,
-                "name": "Second Source",
-                "description": "Second source service",
-                "base_url": "http://second-source:8000",
-                "docker_container_name": "second-source",
-            },
-        )
-
-        target_response = await client.post(
-            "/services/",
-            json={
-                "system_id": system_id,
-                "name": "Second Target",
-                "description": "Second target service",
-                "base_url": "http://second-target:8000",
-                "docker_container_name": "second-target",
-            },
-        )
-
-        assert source_response.status_code == 201
-        assert target_response.status_code == 201
-
-        second_source_id = source_response.json()["id"]
-        second_target_id = target_response.json()["id"]
-
-        # Create second dependency
-        response_2 = await client.post(
-            "/dependencies/",
-            json={
-                "source_service_id": second_source_id,
-                "target_service_id": second_target_id,
-                "dependency_type": "DATABASE",
-            },
-        )
-
-        assert response_2.status_code == 201
-
-        response = await client.get("/dependencies/")
 
     assert response.status_code == 200
 
@@ -191,52 +235,67 @@ async def test_get_dependencies(db_session, override_db):
 
 
 @pytest.mark.asyncio
-async def test_get_dependency(db_session, override_db):
+async def test_get_dependency(
+    db_session,
+    override_db,
+):
+    user = await create_test_user(
+        db_session,
+        "get",
+    )
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
     ) as client:
 
         source_service_id, target_service_id = (
-            await create_test_services(client)
+            await create_test_services(
+                client,
+                user,
+            )
         )
 
-        create_response = await client.post(
-            "/dependencies/",
-            json={
-                "source_service_id": source_service_id,
-                "target_service_id": target_service_id,
-                "dependency_type": "HTTP",
-            },
+        data = await create_dependency(
+            client,
+            source_service_id,
+            target_service_id,
+            user,
         )
-
-        assert create_response.status_code == 201
-
-        dependency_id = create_response.json()["id"]
 
         response = await client.get(
-            f"/dependencies/{dependency_id}"
+            f"/dependencies/{data['id']}",
+            headers=auth_headers(user),
         )
 
     assert response.status_code == 200
 
-    data = response.json()
+    result = response.json()
 
-    assert data["id"] == dependency_id
-    assert data["source_service_id"] == source_service_id
-    assert data["target_service_id"] == target_service_id
-    assert data["dependency_type"] == "HTTP"
+    assert result["id"] == data["id"]
+    assert result["source_service_id"] == source_service_id
+    assert result["target_service_id"] == target_service_id
+    assert result["dependency_type"] == "HTTP"
 
 
 @pytest.mark.asyncio
-async def test_get_dependency_not_found(db_session, override_db):
+async def test_get_dependency_not_found(
+    db_session,
+    override_db,
+):
+    user = await create_test_user(
+        db_session,
+        "notfound",
+    )
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
     ) as client:
 
         response = await client.get(
-            "/dependencies/00000000-0000-0000-0000-000000000000"
+            "/dependencies/00000000-0000-0000-0000-000000000000",
+            headers=auth_headers(user),
         )
 
     assert response.status_code == 404
@@ -244,48 +303,62 @@ async def test_get_dependency_not_found(db_session, override_db):
 
 
 @pytest.mark.asyncio
-async def test_update_dependency(db_session, override_db):
+async def test_update_dependency(
+    db_session,
+    override_db,
+):
+    user = await create_test_user(
+        db_session,
+        "update",
+    )
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
     ) as client:
 
         source_service_id, target_service_id = (
-            await create_test_services(client)
+            await create_test_services(
+                client,
+                user,
+            )
         )
 
-        create_response = await client.post(
-            "/dependencies/",
-            json={
-                "source_service_id": source_service_id,
-                "target_service_id": target_service_id,
-                "dependency_type": "HTTP",
-            },
+        data = await create_dependency(
+            client,
+            source_service_id,
+            target_service_id,
+            user,
         )
-
-        assert create_response.status_code == 201
-
-        dependency_id = create_response.json()["id"]
 
         response = await client.patch(
-            f"/dependencies/{dependency_id}",
+            f"/dependencies/{data['id']}",
             json={
                 "dependency_type": "DATABASE",
             },
+            headers=auth_headers(user),
         )
 
     assert response.status_code == 200
 
-    data = response.json()
+    result = response.json()
 
-    assert data["id"] == dependency_id
-    assert data["source_service_id"] == source_service_id
-    assert data["target_service_id"] == target_service_id
-    assert data["dependency_type"] == "DATABASE"
+    assert result["id"] == data["id"]
+    assert result["source_service_id"] == source_service_id
+    assert result["target_service_id"] == target_service_id
+    assert result["dependency_type"] == "DATABASE"
 
 
 @pytest.mark.asyncio
-async def test_update_dependency_not_found(db_session, override_db):
+async def test_update_dependency_not_found(
+    db_session,
+    override_db,
+):
+    user = await create_test_user(
+        db_session,
+        "updatenotfound",
+    )
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
@@ -296,6 +369,7 @@ async def test_update_dependency_not_found(db_session, override_db):
             json={
                 "dependency_type": "DATABASE",
             },
+            headers=auth_headers(user),
         )
 
     assert response.status_code == 404
@@ -303,35 +377,42 @@ async def test_update_dependency_not_found(db_session, override_db):
 
 
 @pytest.mark.asyncio
-async def test_delete_dependency(db_session, override_db):
+async def test_delete_dependency(
+    db_session,
+    override_db,
+):
+    user = await create_test_user(
+        db_session,
+        "delete",
+    )
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
     ) as client:
 
         source_service_id, target_service_id = (
-            await create_test_services(client)
+            await create_test_services(
+                client,
+                user,
+            )
         )
 
-        create_response = await client.post(
-            "/dependencies/",
-            json={
-                "source_service_id": source_service_id,
-                "target_service_id": target_service_id,
-                "dependency_type": "HTTP",
-            },
+        data = await create_dependency(
+            client,
+            source_service_id,
+            target_service_id,
+            user,
         )
-
-        assert create_response.status_code == 201
-
-        dependency_id = create_response.json()["id"]
 
         delete_response = await client.delete(
-            f"/dependencies/{dependency_id}"
+            f"/dependencies/{data['id']}",
+            headers=auth_headers(user),
         )
 
         get_response = await client.get(
-            f"/dependencies/{dependency_id}"
+            f"/dependencies/{data['id']}",
+            headers=auth_headers(user),
         )
 
     assert delete_response.status_code == 204
@@ -339,15 +420,126 @@ async def test_delete_dependency(db_session, override_db):
 
 
 @pytest.mark.asyncio
-async def test_delete_dependency_not_found(db_session, override_db):
+async def test_delete_dependency_not_found(
+    db_session,
+    override_db,
+):
+    user = await create_test_user(
+        db_session,
+        "deletenotfound",
+    )
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
     ) as client:
 
         response = await client.delete(
-            "/dependencies/00000000-0000-0000-0000-000000000000"
+            "/dependencies/00000000-0000-0000-0000-000000000000",
+            headers=auth_headers(user),
         )
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Dependency not found"
+
+
+@pytest.mark.asyncio
+async def test_unauthenticated_dependency_request(
+    db_session,
+    override_db,
+):
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+
+        response = await client.get(
+            "/dependencies/",
+        )
+
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_cross_user_dependency_access_denied(
+    db_session,
+    override_db,
+):
+    owner = await create_test_user(
+        db_session,
+        "owner",
+    )
+
+    other_user = await create_test_user(
+        db_session,
+        "other",
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+
+        source_service_id, target_service_id = (
+            await create_test_services(
+                client,
+                owner,
+                system_name="Owner System",
+            )
+        )
+
+        data = await create_dependency(
+            client,
+            source_service_id,
+            target_service_id,
+            owner,
+        )
+
+        response = await client.get(
+            f"/dependencies/{data['id']}",
+            headers=auth_headers(other_user),
+        )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Dependency not found"
+
+
+@pytest.mark.asyncio
+async def test_cross_user_dependency_creation_denied(
+    db_session,
+    override_db,
+):
+    owner = await create_test_user(
+        db_session,
+        "createowner",
+    )
+
+    other_user = await create_test_user(
+        db_session,
+        "createother",
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+
+        source_service_id, target_service_id = (
+            await create_test_services(
+                client,
+                owner,
+                system_name="Owner Dependency System",
+            )
+        )
+
+        response = await client.post(
+            "/dependencies/",
+            json={
+                "source_service_id": source_service_id,
+                "target_service_id": target_service_id,
+                "dependency_type": "HTTP",
+            },
+            headers=auth_headers(other_user),
+        )
+
+    assert response.status_code == 404

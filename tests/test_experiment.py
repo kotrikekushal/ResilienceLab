@@ -150,6 +150,10 @@ async def create_full_experiment(
 
     experiment_id = experiment["id"]
 
+    # --------------------------------------------------------
+    # Create workload
+    # --------------------------------------------------------
+
     workload_response = await client.post(
         "/workloads/",
         json={
@@ -158,9 +162,14 @@ async def create_full_experiment(
             "requests_per_second": 10,
             "duration_seconds": 10,
         },
+        headers=get_auth_headers(user),
     )
 
     assert workload_response.status_code == 201
+
+    # --------------------------------------------------------
+    # Create failure
+    # --------------------------------------------------------
 
     failure_response = await client.post(
         "/failures/",
@@ -173,6 +182,7 @@ async def create_full_experiment(
                 "delay_ms": 500,
             },
         },
+        headers=get_auth_headers(user),
     )
 
     assert failure_response.status_code == 201
@@ -708,12 +718,10 @@ async def test_clone_experiment(
         base_url="http://test",
     ) as client:
 
-        source, system_id, service_id = (
-            await create_full_experiment(
-                client,
-                db_session,
-                user,
-            )
+        source, system_id, service_id = await create_full_experiment(
+            client,
+            db_session,
+            user,
         )
 
         source_id = source["id"]
@@ -832,12 +840,10 @@ async def test_reuse_experiment(
         base_url="http://test",
     ) as client:
 
-        source, system_id, service_id = (
-            await create_full_experiment(
-                client,
-                db_session,
-                user,
-            )
+        source, system_id, service_id = await create_full_experiment(
+            client,
+            db_session,
+            user,
         )
 
         source_id = source["id"]
@@ -970,12 +976,10 @@ async def test_get_experiment_configuration(
         base_url="http://test",
     ) as client:
 
-        experiment, system_id, service_id = (
-            await create_full_experiment(
-                client,
-                db_session,
-                user,
-            )
+        experiment, system_id, service_id = await create_full_experiment(
+            client,
+            db_session,
+            user,
         )
 
         experiment_id = experiment["id"]

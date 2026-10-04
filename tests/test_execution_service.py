@@ -3,16 +3,32 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from backend.db.models.system import SystemDB
+from backend.db.models.user import UserDB
 from backend.db.models.service import ServiceDB
 from backend.db.models.experiment import ExperimentDB
 from backend.db.models.execution import ExecutionDB
 from backend.db.models.metric import MetricDB
+
+from backend.security.password import hash_password
 
 from backend.services.execution_service import (
     get_execution_details,
     get_experiment_executions,
     get_execution_metrics,
 )
+
+
+async def create_test_user(db_session):
+    user = UserDB(
+        username=f"testuser_{uuid4().hex[:8]}",
+        email=f"test_{uuid4().hex[:8]}@example.com",
+        password_hash=hash_password("TestPassword@123"),
+        is_active=True,
+    )
+
+    db_session.add(user)
+    await db_session.flush()
+    return user
 
 
 # ============================================================
@@ -22,9 +38,12 @@ from backend.services.execution_service import (
 @pytest.mark.asyncio
 async def test_get_execution_details(db_session):
 
+    user = await create_test_user(db_session)
+
     system = SystemDB(
         name="Execution Details System",
         description="Test system",
+        user_id=user.id,
     )
 
     db_session.add(system)
@@ -91,9 +110,12 @@ async def test_get_execution_details_not_found(db_session):
 @pytest.mark.asyncio
 async def test_get_experiment_executions(db_session):
 
+    user = await create_test_user(db_session)
+
     system = SystemDB(
         name="Execution History System",
         description="Test system",
+        user_id=user.id,
     )
 
     db_session.add(system)
@@ -151,9 +173,12 @@ async def test_get_experiment_executions_ordered_by_run_number(
     db_session,
 ):
 
+    user = await create_test_user(db_session)
+
     system = SystemDB(
         name="Execution Order System",
         description="Test system",
+        user_id=user.id,
     )
 
     db_session.add(system)
@@ -218,9 +243,12 @@ async def test_get_experiment_executions_ordered_by_run_number(
 @pytest.mark.asyncio
 async def test_get_experiment_executions_empty(db_session):
 
+    user = await create_test_user(db_session)
+
     system = SystemDB(
         name="Empty Execution System",
         description="Test system",
+        user_id=user.id,
     )
 
     db_session.add(system)
@@ -253,9 +281,12 @@ async def test_get_experiment_executions_empty(db_session):
 @pytest.mark.asyncio
 async def test_get_execution_metrics(db_session):
 
+    user = await create_test_user(db_session)
+
     system = SystemDB(
         name="Metrics System",
         description="Test system",
+        user_id=user.id,
     )
 
     db_session.add(system)
@@ -356,9 +387,12 @@ async def test_get_execution_metrics(db_session):
 @pytest.mark.asyncio
 async def test_get_execution_metrics_empty(db_session):
 
+    user = await create_test_user(db_session)
+
     system = SystemDB(
         name="Empty Metrics System",
         description="Test system",
+        user_id=user.id,
     )
 
     db_session.add(system)
