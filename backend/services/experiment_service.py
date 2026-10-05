@@ -64,6 +64,7 @@ async def clone_experiment(
                 if new_description is not None
                 else source_experiment.description
             ),
+            hypothesis=deepcopy(source_experiment.hypothesis),
             status="created",
             started_at=None,
             finished_at=None,
@@ -185,6 +186,7 @@ async def reuse_experiment(
                 if new_description is not None
                 else source_experiment.description
             ),
+            hypothesis=deepcopy(source_experiment.hypothesis),
             status="created",
             started_at=None,
             finished_at=None,
