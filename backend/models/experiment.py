@@ -4,11 +4,13 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 from backend.models.experiment_run import ServiceResultResponse
 from backend.models.result import ResultResponse
+from typing import Any
 
 class ExperimentCreate(BaseModel):
     system_id: UUID
     name: str
     description: str | None = None
+    hypothesis: dict[str, Any] | None = None
 
 
 class ExperimentUpdate(BaseModel):
@@ -18,6 +20,7 @@ class ExperimentUpdate(BaseModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     error_message: str | None  = None
+    hypothesis: dict[str, Any] | None = None
 
 
 class ExperimentResponse(BaseModel):
@@ -33,6 +36,7 @@ class ExperimentResponse(BaseModel):
     error_message: str | None
     created_at: datetime
     result: ResultResponse | None = None
+    hypothesis: dict[str, Any] | None = None
 
 class ExecutionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)

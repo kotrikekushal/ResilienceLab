@@ -99,6 +99,7 @@ async def create_experiment(
         system_id=data.system_id,
         name=data.name,
         description=data.description,
+        hypothesis=data.hypothesis,
     )
 
     db.add(experiment)
