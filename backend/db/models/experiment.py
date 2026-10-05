@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import DateTime, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-
+from sqlalchemy import JSON
 from backend.db.base import Base
 
 if TYPE_CHECKING:
@@ -90,3 +90,8 @@ class ExperimentDB(Base):
         back_populates="experiment",
         cascade="all, delete-orphan",
     )
+
+    hypothesis = mapped_column(
+        JSON,
+        nullable=True,
+)
