@@ -1,6 +1,6 @@
 import uuid
 from types import SimpleNamespace
-
+from backend.services.analysis import _evaluate_hypothesis
 import pytest
 
 from backend.services.analysis import (
@@ -741,3 +741,73 @@ def test_analyze_experiment_requires_all_execution_types():
     assert "Missing execution types" in str(
         exc_info.value
     )
+
+def test_hypothesis_not_defined():
+    result = _evaluate_hypothesis(
+        None,
+        {
+            "success_rate": 97.0,
+            "p95_latency_ms": 1500.0,
+            "availability": 98.0,
+        },
+    )
+
+    assert result["defined"] is False
+    assert result["passed"] is None
+    assert result["checks"] == []
+
+
+def test_hypothesis_passes():
+    result = _evaluate_hypothesis(
+        {
+            "min_success_rate": 95,
+            "max_p95_latency_ms": 2000,
+            "min_availability": 95,
+        },
+        {
+            "success_rate": 97.0,
+            "p95_latency_ms": 1500.0,
+            "availability": 98.0,
+        },
+    )
+
+    assert result["defined"] is True
+    assert result["passed"] is True
+    assert len(result["checks"]) == 3
+    assert all(check["passed"] for check in result["checks"])
+
+
+def test_hypothesis_fails():
+    result = _evaluate_hypothesis(
+        {
+            "min_success_rate": 95,
+            "max_p95_latency_ms": 2000,
+        },
+        {
+            "success_rate": 90.0,
+            "p95_latency_ms": 1500.0,
+            "availability": 98.0,
+        },
+    )
+
+    assert result["defined"] is True
+    assert result["passed"] is False
+    assert result["checks"][0]["passed"] is False
+    assert result["checks"][1]["passed"] is True
+
+
+def test_hypothesis_partial_criteria():
+    result = _evaluate_hypothesis(
+        {
+            "min_success_rate": 95,
+        },
+        {
+            "success_rate": 97.0,
+            "p95_latency_ms": 3000.0,
+            "availability": 90.0,
+        },
+    )
+
+    assert result["defined"] is True
+    assert result["passed"] is True
+    assert len(result["checks"]) == 1

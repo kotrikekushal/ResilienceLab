@@ -1003,11 +1003,6 @@ def analyze_experiment(
         "recovery"
     ]
 
-    hypothesis_evaluation = _evaluate_hypothesis(
-        experiment_result.get("hypothesis"),
-        failure,
-    )
-
     # ------------------------------------------------------------
     # EXTRACT RESULTS
     # ------------------------------------------------------------
@@ -1023,6 +1018,12 @@ def analyze_experiment(
     recovery = _extract_result(
         recovery_execution["result"]
     )
+
+    hypothesis_evaluation = _evaluate_hypothesis(
+        experiment_result.get("hypothesis"),
+        failure,
+    )
+
 
     # ------------------------------------------------------------
     # DEGRADATION
@@ -1211,7 +1212,7 @@ def analyze_experiment(
                 if recovery_time is not None
                 else None
             ),
-            
+
         "hypothesis_evaluation": hypothesis_evaluation,
 
             "recovery_time_measured": (
