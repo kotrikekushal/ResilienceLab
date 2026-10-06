@@ -521,6 +521,7 @@ async def execute_experiment(
         experiment_result = {
             "experiment_id": experiment.id,
             "status": "completed",
+            "hypothesis": experiment.hypothesis,
 
             "executions": [
 

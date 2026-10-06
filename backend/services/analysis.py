@@ -865,6 +865,65 @@ def _extract_result(result) -> dict:
         "availability": result.availability,
     }
 
+def _evaluate_hypothesis(
+    hypothesis: dict | None,
+    failure: dict,
+) -> dict:
+    """
+    Compares the experiment hypothesis against
+    the actual failure-phase metrics.
+    """
+
+    if not hypothesis:
+        return {
+            "defined": False,
+            "passed": None,
+            "checks": [],
+        }
+
+    checks = []
+
+    if "min_success_rate" in hypothesis:
+        expected = hypothesis["min_success_rate"]
+        actual = failure["success_rate"]
+
+        checks.append({
+            "metric": "success_rate",
+            "expected": f">= {expected}%",
+            "actual": actual,
+            "passed": actual >= expected,
+        })
+
+    if "max_p95_latency_ms" in hypothesis:
+        expected = hypothesis["max_p95_latency_ms"]
+        actual = failure["p95_latency_ms"]
+
+        checks.append({
+            "metric": "p95_latency_ms",
+            "expected": f"<= {expected} ms",
+            "actual": actual,
+            "passed": actual <= expected,
+        })
+
+    if "min_availability" in hypothesis:
+        expected = hypothesis["min_availability"]
+        actual = failure["availability"]
+
+        checks.append({
+            "metric": "availability",
+            "expected": f">= {expected}%",
+            "actual": actual,
+            "passed": actual >= expected,
+        })
+
+    return {
+        "defined": True,
+        "passed": all(
+            check["passed"]
+            for check in checks
+        ) if checks else None,
+        "checks": checks,
+    }
 
 def analyze_experiment(
     experiment_result: dict,
@@ -943,6 +1002,11 @@ def analyze_experiment(
     recovery_execution = execution_map[
         "recovery"
     ]
+
+    hypothesis_evaluation = _evaluate_hypothesis(
+        experiment_result.get("hypothesis"),
+        failure,
+    )
 
     # ------------------------------------------------------------
     # EXTRACT RESULTS
@@ -1147,6 +1211,8 @@ def analyze_experiment(
                 if recovery_time is not None
                 else None
             ),
+            
+        "hypothesis_evaluation": hypothesis_evaluation,
 
             "recovery_time_measured": (
                 recovery_time is not None

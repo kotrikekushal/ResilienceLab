@@ -155,6 +155,17 @@ class FailureImpactResponse(BaseModel):
     parameters: dict | None
     impact: str
 
+class HypothesisCheckResponse(BaseModel):
+    metric: str
+    expected: str
+    actual: float
+    passed: bool
+
+
+class HypothesisEvaluationResponse(BaseModel):
+    defined: bool
+    passed: bool | None
+    checks: list[HypothesisCheckResponse]
 
 class AnalysisResponse(BaseModel):
     experiment_id: UUID
@@ -167,6 +178,7 @@ class AnalysisResponse(BaseModel):
     services: list[ServiceImpactResponse]
     failures: list[FailureImpactResponse]
     recommendations: list[str]
+    hypothesis_evaluation: HypothesisEvaluationResponse
 
 
 class ExperimentRunResponse(BaseModel):
