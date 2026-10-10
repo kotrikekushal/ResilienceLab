@@ -12,7 +12,7 @@ ENV_FILES = {
 
 class Settings(BaseSettings):
     DATABASE_URL: str
-    TEST_DATABASE_URL: str
+    TEST_DATABASE_URL: str | None = None
     REDIS_BROKER_URL: str
     REDIS_RESULT_BACKEND: str
     

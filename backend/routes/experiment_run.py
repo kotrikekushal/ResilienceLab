@@ -1,5 +1,5 @@
-from uuid import UUID
 import traceback
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -44,14 +44,6 @@ async def get_owned_experiment(
     """
     Return an experiment only when it belongs to the
     authenticated user through its parent system.
-
-    Ownership path:
-
-        User
-          ↓
-        System
-          ↓
-        Experiment
     """
 
     result = await db.execute(
@@ -91,10 +83,9 @@ async def run_experiment(
     current_user: UserDB = Depends(get_current_user),
 ):
     try:
-
-        # ====================================================
+        # ----------------------------------------------------
         # 1. CREATE SYSTEM
-        # ====================================================
+        # ----------------------------------------------------
 
         system = SystemDB(
             user_id=current_user.id,
@@ -103,17 +94,15 @@ async def run_experiment(
         )
 
         db.add(system)
-
         await db.flush()
 
-        # ====================================================
+        # ----------------------------------------------------
         # 2. CREATE SERVICES
-        # ====================================================
+        # ----------------------------------------------------
 
         services = {}
 
         for service_data in data.services:
-
             service = ServiceDB(
                 system_id=system.id,
                 name=service_data.name,
@@ -125,17 +114,15 @@ async def run_experiment(
             )
 
             db.add(service)
-
             await db.flush()
 
             services[service.name] = service
 
-        # ====================================================
+        # ----------------------------------------------------
         # 3. CREATE DEPENDENCIES
-        # ====================================================
+        # ----------------------------------------------------
 
         for dependency_data in data.dependencies:
-
             if dependency_data.source_service not in services:
                 raise ValueError(
                     f"Source service not found: "
@@ -162,9 +149,9 @@ async def run_experiment(
 
             db.add(dependency)
 
-        # ====================================================
+        # ----------------------------------------------------
         # 4. CREATE EXPERIMENT
-        # ====================================================
+        # ----------------------------------------------------
 
         experiment = ExperimentDB(
             system_id=system.id,
@@ -174,28 +161,28 @@ async def run_experiment(
         )
 
         db.add(experiment)
-
         await db.flush()
 
-        # ====================================================
+        # ----------------------------------------------------
         # 5. CREATE WORKLOAD
-        # ====================================================
+        # ----------------------------------------------------
 
         workload = WorkloadDB(
             experiment_id=experiment.id,
             total_requests=data.workload.total_requests,
-            requests_per_second=data.workload.requests_per_second,
+            requests_per_second=(
+                data.workload.requests_per_second
+            ),
             duration_seconds=data.workload.duration_seconds,
         )
 
         db.add(workload)
 
-        # ====================================================
+        # ----------------------------------------------------
         # 6. CREATE FAILURES
-        # ====================================================
+        # ----------------------------------------------------
 
         for failure_data in data.failures:
-
             if failure_data.service not in services:
                 raise ValueError(
                     f"Failure service not found: "
@@ -216,40 +203,34 @@ async def run_experiment(
 
             db.add(failure)
 
-        # ====================================================
+        # ----------------------------------------------------
         # 7. SAVE CONFIGURATION
-        # ====================================================
+        # ----------------------------------------------------
 
         await db.commit()
 
-        # ====================================================
+        # ----------------------------------------------------
         # 8. QUEUE CELERY TASK
-        # ====================================================
+        # ----------------------------------------------------
 
         try:
-
             task = execute_experiment_task.delay(
                 str(experiment.id)
             )
 
-        except Exception as e:
-
+        except Exception as exc:
             result = await db.execute(
                 select(ExperimentDB).where(
                     ExperimentDB.id == experiment.id
                 )
             )
 
-            failed_experiment = (
-                result.scalar_one_or_none()
-            )
+            failed_experiment = result.scalar_one_or_none()
 
             if failed_experiment is not None:
-
                 failed_experiment.status = "failed"
-
                 failed_experiment.error_message = (
-                    f"Failed to queue experiment: {str(e)}"
+                    f"Failed to queue experiment: {str(exc)}"
                 )
 
                 await db.commit()
@@ -259,9 +240,9 @@ async def run_experiment(
                 detail="Unable to queue experiment",
             )
 
-        # ====================================================
+        # ----------------------------------------------------
         # 9. RETURN QUEUED RESPONSE
-        # ====================================================
+        # ----------------------------------------------------
 
         return {
             "experiment_id": experiment.id,
@@ -272,27 +253,19 @@ async def run_experiment(
     except HTTPException:
         raise
 
-    except Exception as e:
-
+    except Exception as exc:
         await db.rollback()
 
-        print(
-            "\n========== EXPERIMENT ERROR =========="
-        )
-
-        print(str(e))
-
+        print("\n========== EXPERIMENT ERROR ==========")
+        print(str(exc))
         traceback.print_exc()
-
-        print(
-            "======================================\n"
-        )
+        print("======================================\n")
 
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
                 "message": "Experiment creation failed",
-                "error_message": str(e),
+                "error_message": str(exc),
             },
         )
 
@@ -310,10 +283,9 @@ async def rerun_experiment(
     db: AsyncSession = Depends(get_db),
     current_user: UserDB = Depends(get_current_user),
 ):
-
-    # ========================================================
-    # 1. LOAD ONLY USER'S EXPERIMENT WITH ROW LOCK
-    # ========================================================
+    # --------------------------------------------------------
+    # 1. LOAD OWNED EXPERIMENT WITH ROW LOCK
+    # --------------------------------------------------------
 
     result = await db.execute(
         select(ExperimentDB)
@@ -336,26 +308,19 @@ async def rerun_experiment(
             detail="Experiment not found",
         )
 
-    # ========================================================
+    # --------------------------------------------------------
     # 2. PREVENT DUPLICATE ACTIVE RUNS
-    # ========================================================
+    # --------------------------------------------------------
 
-    if experiment.status in {
-        "queued",
-        "running",
-    }:
-
+    if experiment.status in {"queued", "running"}:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                "Experiment is already queued "
-                "or running"
-            ),
+            detail="Experiment is already queued or running",
         )
 
-    # ========================================================
-    # 3. RESET CURRENT EXPERIMENT EXECUTION STATE
-    # ========================================================
+    # --------------------------------------------------------
+    # 3. RESET EXECUTION STATE
+    # --------------------------------------------------------
 
     experiment.status = "queued"
     experiment.started_at = None
@@ -364,34 +329,28 @@ async def rerun_experiment(
 
     await db.commit()
 
-    # ========================================================
+    # --------------------------------------------------------
     # 4. QUEUE NEW EXECUTION
-    # ========================================================
+    # --------------------------------------------------------
 
     try:
-
         task = execute_experiment_task.delay(
             str(experiment.id)
         )
 
-    except Exception as e:
-
+    except Exception as exc:
         result = await db.execute(
             select(ExperimentDB).where(
                 ExperimentDB.id == experiment.id
             )
         )
 
-        failed_experiment = (
-            result.scalar_one_or_none()
-        )
+        failed_experiment = result.scalar_one_or_none()
 
         if failed_experiment is not None:
-
             failed_experiment.status = "failed"
-
             failed_experiment.error_message = (
-                f"Failed to queue rerun: {str(e)}"
+                f"Failed to queue experiment rerun: {str(exc)}"
             )
 
             await db.commit()
@@ -401,9 +360,9 @@ async def rerun_experiment(
             detail="Unable to queue experiment rerun",
         )
 
-    # ========================================================
-    # 5. RETURN TASK
-    # ========================================================
+    # --------------------------------------------------------
+    # 5. RETURN QUEUED RESPONSE
+    # --------------------------------------------------------
 
     return {
         "experiment_id": experiment.id,
@@ -422,10 +381,9 @@ async def get_experiment_status(
     db: AsyncSession = Depends(get_db),
     current_user: UserDB = Depends(get_current_user),
 ):
-
-    # ========================================================
+    # --------------------------------------------------------
     # 1. VERIFY OWNERSHIP
-    # ========================================================
+    # --------------------------------------------------------
 
     experiment = await get_owned_experiment(
         db=db,
@@ -433,9 +391,9 @@ async def get_experiment_status(
         user_id=current_user.id,
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # 2. LOAD EXECUTIONS
-    # ========================================================
+    # --------------------------------------------------------
 
     result = await db.execute(
         select(ExecutionDB)
@@ -449,9 +407,9 @@ async def get_experiment_status(
 
     executions = result.scalars().all()
 
-    # ========================================================
+    # --------------------------------------------------------
     # 3. RETURN STATUS
-    # ========================================================
+    # --------------------------------------------------------
 
     return {
         "experiment_id": experiment.id,
