@@ -6,7 +6,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.session import get_db
+from sqlalchemy.orm import selectinload
 
+from backend.db.models.metric import MetricDB
+from backend.db.models.result import ResultDB
+from backend.services.analysis import analyze_experiment
 from backend.db.models.system import SystemDB
 from backend.db.models.service import ServiceDB
 from backend.db.models.dependency import DependencyDB
@@ -427,4 +431,149 @@ async def get_experiment_status(
             }
             for execution in executions
         ],
+    }
+
+
+# ============================================================
+# GET COMPLETE EXPERIMENT REPORT
+# ============================================================
+
+
+@router.get("/{experiment_id}/report")
+async def get_experiment_report(
+    experiment_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
+):
+    # 1. Verify experiment ownership
+    experiment = await get_owned_experiment(
+        db=db,
+        experiment_id=experiment_id,
+        user_id=current_user.id,
+    )
+
+    # 2. Load executions and their summary results only
+    query = await db.execute(
+        select(ExecutionDB)
+        .options(selectinload(ExecutionDB.result))
+        .where(ExecutionDB.experiment_id == experiment.id)
+        .order_by(ExecutionDB.run_number)
+    )
+    executions = list(query.scalars().all())
+
+    # 3. Select the latest execution for each phase
+    latest_by_type = {}
+
+    for execution in executions:
+        if execution.run_type in {"baseline", "failure", "recovery"}:
+            latest_by_type[execution.run_type] = execution
+
+    def serialize_result(execution):
+        if execution is None or execution.result is None:
+            return None
+
+        result = execution.result
+
+        return {
+            "status": execution.status,
+            "total_requests": result.total_requests,
+            "successful_requests": result.successful_requests,
+            "failed_requests": result.failed_requests,
+            "success_rate": result.success_rate,
+            "error_rate": result.error_rate,
+            "average_latency_ms": result.average_latency_ms,
+            "p50_latency_ms": result.p50_latency_ms,
+            "p95_latency_ms": result.p95_latency_ms,
+            "p99_latency_ms": result.p99_latency_ms,
+            "throughput": result.throughput,
+            "availability": result.availability,
+        }
+
+    baseline = latest_by_type.get("baseline")
+    failure = latest_by_type.get("failure")
+    recovery = latest_by_type.get("recovery")
+
+    # 4. Reconstruct the analysis using the existing analysis service
+    analysis = None
+    analysis_status = "unavailable"
+
+    required_phases = (baseline, failure, recovery)
+
+    if (
+        experiment.status == "completed"
+        and all(
+            execution is not None
+            and execution.status == "completed"
+            and execution.result is not None
+            for execution in required_phases
+        )
+    ):
+        analysis_input = {
+            "experiment_id": str(experiment.id),
+            "executions": [
+                {
+                    "id": execution.id,
+                    "experiment_id": experiment.id,
+                    "run_number": execution.run_number,
+                    "run_type": execution.run_type,
+                    "status": execution.status,
+                    "started_at": execution.started_at,
+                    "finished_at": execution.finished_at,
+                    "error_message": execution.error_message,
+                    "result": execution.result,
+                    "services": [],
+                }
+                for execution in required_phases
+            ],
+        }
+
+        try:
+            analysis = analyze_experiment(
+                analysis_input,
+                failures=[],
+                recovery_time_seconds=None,
+            )
+            analysis_status = "reconstructed"
+        except (ValueError, KeyError, TypeError, AttributeError):
+            analysis_status = "unavailable"
+
+    # 5. Return only the compact report; never return request metrics
+    return {
+        "experiment_id": str(experiment.id),
+        "experiment_name": experiment.name,
+        "status": experiment.status,
+        "started_at": experiment.started_at,
+        "finished_at": experiment.finished_at,
+        "error_message": experiment.error_message,
+        "baseline": (
+            analysis["baseline"]
+            if analysis is not None
+            else serialize_result(baseline)
+        ),
+        "failure": (
+            analysis["failure"]
+            if analysis is not None
+            else serialize_result(failure)
+        ),
+        "recovery": (
+            analysis["recovery"]
+            if analysis is not None
+            else serialize_result(recovery)
+        ),
+        "overall": (
+            analysis["overall"]
+            if analysis is not None
+            else None
+        ),
+        "degradation": (
+            analysis["degradation"]
+            if analysis is not None
+            else None
+        ),
+        "recommendations": (
+            analysis["recommendations"]
+            if analysis is not None
+            else []
+        ),
+        "analysis_status": analysis_status,
     }
