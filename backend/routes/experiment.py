@@ -3,7 +3,8 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from sqlalchemy.orm import selectinload
+from backend.db.models.execution import ExecutionDB
 from backend.db.models.experiment import ExperimentDB
 from backend.db.models.system import SystemDB
 from backend.db.models.user import UserDB
@@ -378,4 +379,156 @@ async def cancel_experiment(
         "experiment_id": experiment.id,
         "status": "cancel_requested",
         "message": "Experiment cancellation requested",
+    }
+
+
+# ============================================================
+# GET COMPLETE EXPERIMENT REPORT
+# ============================================================
+
+@router.get("/{experiment_id}/report")
+async def get_experiment_report(
+    experiment_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user),
+):
+    # --------------------------------------------------------
+    # 1. VERIFY EXPERIMENT OWNERSHIP
+    # --------------------------------------------------------
+
+    experiment = await get_owned_experiment(
+        db=db,
+        experiment_id=experiment_id,
+        user_id=current_user.id,
+    )
+
+    # --------------------------------------------------------
+    # 2. LOAD EXECUTIONS AND RESULTS
+    # --------------------------------------------------------
+
+    result = await db.execute(
+        select(ExecutionDB)
+        .options(
+            selectinload(ExecutionDB.result)
+        )
+        .where(
+            ExecutionDB.experiment_id == experiment.id
+        )
+        .order_by(ExecutionDB.run_number)
+    )
+
+    executions = result.scalars().all()
+
+    # --------------------------------------------------------
+    # 3. SELECT LATEST EXECUTION FOR EACH PHASE
+    # --------------------------------------------------------
+
+    latest_by_type = {}
+
+    for execution in executions:
+        if execution.run_type in {
+            "baseline",
+            "failure",
+            "recovery",
+        }:
+            latest_by_type[execution.run_type] = execution
+
+    # --------------------------------------------------------
+    # 4. SERIALIZE EXECUTION RESULTS
+    # --------------------------------------------------------
+
+    def serialize_result(execution):
+
+        if execution is None or execution.result is None:
+            return None
+
+        result = execution.result
+
+        return {
+    "total_requests": result.total_requests,
+    "successful_requests": result.successful_requests,
+    "failed_requests": result.failed_requests,
+    "success_rate": result.success_rate,
+    "error_rate": result.error_rate,
+    "average_latency_ms": result.average_latency_ms,
+    "p50_latency_ms": result.p50_latency_ms,
+    "p95_latency_ms": result.p95_latency_ms,
+    "p99_latency_ms": result.p99_latency_ms,
+    "successful_average_latency_ms": (
+        result.successful_average_latency_ms
+    ),
+    "successful_p50_latency_ms": result.successful_p50_latency_ms,
+    "successful_p95_latency_ms": result.successful_p95_latency_ms,
+    "successful_p99_latency_ms": result.successful_p99_latency_ms,
+    "throughput": result.throughput,
+    "successful_throughput": result.successful_throughput,
+    "availability": result.availability,
+}
+
+    baseline = latest_by_type.get("baseline")
+    failure = latest_by_type.get("failure")
+    recovery = latest_by_type.get("recovery")
+
+    # --------------------------------------------------------
+    # 5. RETRIEVE PERSISTED ANALYSIS
+    # --------------------------------------------------------
+
+    analysis = experiment.analysis
+
+    analysis_status = (
+        "saved"
+        if analysis is not None
+        else "unavailable"
+    )
+
+    # --------------------------------------------------------
+    # 6. RETURN COMPLETE REPORT
+    # --------------------------------------------------------
+
+    return {
+        "experiment_id": str(experiment.id),
+        "experiment_name": experiment.name,
+        "status": experiment.status,
+        "started_at": experiment.started_at,
+        "finished_at": experiment.finished_at,
+        "error_message": experiment.error_message,
+
+        "baseline": (
+            analysis.get("baseline")
+            if analysis is not None
+            else serialize_result(baseline)
+        ),
+
+        "failure": (
+            analysis.get("failure")
+            if analysis is not None
+            else serialize_result(failure)
+        ),
+
+        "recovery": (
+            analysis.get("recovery")
+            if analysis is not None
+            else serialize_result(recovery)
+        ),
+
+        "overall": (
+            analysis.get("overall")
+            if analysis is not None
+            else None
+        ),
+
+        "degradation": (
+            analysis.get("degradation")
+            if analysis is not None
+            else None
+        ),
+
+        "recommendations": (
+            analysis.get("recommendations", [])
+            if analysis is not None
+            else []
+        ),
+
+        "analysis": analysis,
+        "analysis_status": analysis_status,
     }

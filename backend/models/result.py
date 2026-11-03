@@ -1,3 +1,4 @@
+
 from datetime import datetime
 from uuid import UUID
 
@@ -18,6 +19,12 @@ class ResultCreate(BaseModel):
     throughput: float
     availability: float
 
+    successful_average_latency_ms: float | None = None
+    successful_p50_latency_ms: float | None = None
+    successful_p95_latency_ms: float | None = None
+    successful_p99_latency_ms: float | None = None
+    successful_throughput: float | None = None
+
 
 class ResultUpdate(BaseModel):
     total_requests: int | None = None
@@ -31,6 +38,12 @@ class ResultUpdate(BaseModel):
     p99_latency_ms: float | None = None
     throughput: float | None = None
     availability: float | None = None
+
+    successful_average_latency_ms: float | None = None
+    successful_p50_latency_ms: float | None = None
+    successful_p95_latency_ms: float | None = None
+    successful_p99_latency_ms: float | None = None
+    successful_throughput: float | None = None
 
 
 class ResultResponse(BaseModel):

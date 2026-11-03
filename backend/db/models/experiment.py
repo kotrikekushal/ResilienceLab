@@ -94,4 +94,8 @@ class ExperimentDB(Base):
     hypothesis = mapped_column(
         JSON,
         nullable=True,
-)
+    )
+    analysis = mapped_column(
+        JSON,
+        nullable=True,
+    )

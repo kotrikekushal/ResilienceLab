@@ -855,13 +855,33 @@ def _extract_result(result) -> dict:
         "total_requests": result.total_requests,
         "successful_requests": result.successful_requests,
         "failed_requests": result.failed_requests,
+
         "success_rate": result.success_rate,
         "error_rate": result.error_rate,
+
+        # All-request latency
         "average_latency_ms": result.average_latency_ms,
         "p50_latency_ms": result.p50_latency_ms,
         "p95_latency_ms": result.p95_latency_ms,
         "p99_latency_ms": result.p99_latency_ms,
+
+        # Successful-request latency
+        "successful_average_latency_ms": (
+            result.successful_average_latency_ms
+        ),
+        "successful_p50_latency_ms": (
+            result.successful_p50_latency_ms
+        ),
+        "successful_p95_latency_ms": (
+            result.successful_p95_latency_ms
+        ),
+        "successful_p99_latency_ms": (
+            result.successful_p99_latency_ms
+        ),
+
         "throughput": result.throughput,
+        "successful_throughput": result.successful_throughput,
+
         "availability": result.availability,
     }
 

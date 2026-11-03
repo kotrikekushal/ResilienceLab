@@ -78,6 +78,33 @@ class ResultDB(Base):
         nullable=False,
     )
 
+        # Successful-request latency metrics
+    successful_average_latency_ms: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
+    successful_p50_latency_ms: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
+    successful_p95_latency_ms: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
+    successful_p99_latency_ms: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
+    # Successful-request throughput
+    successful_throughput: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
     throughput: Mapped[float] = mapped_column(
         Float,
         nullable=False,

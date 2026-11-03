@@ -1,7 +1,9 @@
+
 from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
+
 from backend.models.metric import MetricResponse
 from backend.models.result import ResultResponse
 
@@ -59,11 +61,14 @@ class ServiceResultResponse(BaseModel):
     failed_requests: int
     average_latency_ms: float
 
+    successful_average_latency_ms: float | None = None
+    successful_p50_latency_ms: float | None = None
+    successful_p95_latency_ms: float | None = None
+    successful_p99_latency_ms: float | None = None
+
 
 class ExecutionResponse(BaseModel):
-    model_config = ConfigDict(
-        from_attributes=True
-    )
+    model_config = ConfigDict(from_attributes=True)
 
     id: UUID
     experiment_id: UUID
@@ -106,7 +111,15 @@ class RecoveryAnalysisResponse(BaseModel):
     p99_latency_ms: float
     throughput: float
     availability: float
+
+    successful_average_latency_ms: float | None = None
+    successful_p50_latency_ms: float | None = None
+    successful_p95_latency_ms: float | None = None
+    successful_p99_latency_ms: float | None = None
+    successful_throughput: float | None = None
+
     recovery_time_seconds: float | None
+    recovery_time_measured: bool = False
     recovered: bool
     success_rate_recovered: bool
     latency_recovered: bool
@@ -155,6 +168,7 @@ class FailureImpactResponse(BaseModel):
     parameters: dict | None
     impact: str
 
+
 class HypothesisCheckResponse(BaseModel):
     metric: str
     expected: str
@@ -166,6 +180,7 @@ class HypothesisEvaluationResponse(BaseModel):
     defined: bool
     passed: bool | None
     checks: list[HypothesisCheckResponse]
+
 
 class AnalysisResponse(BaseModel):
     experiment_id: UUID
@@ -187,10 +202,12 @@ class ExperimentRunResponse(BaseModel):
     executions: list[ExecutionResponse]
     analysis: AnalysisResponse
 
+
 class ExperimentQueuedResponse(BaseModel):
     experiment_id: UUID
     task_id: str
     status: str
+
 
 class ExecutionDetailResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -207,6 +224,7 @@ class ExecutionDetailResponse(BaseModel):
 
     result: ResultResponse | None = None
     metrics: list[MetricResponse] = []
+
 
 class ExecutionHistoryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)

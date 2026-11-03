@@ -1,12 +1,13 @@
 import asyncio
 import statistics
+import json
 import time
 import os
 from datetime import datetime
 from uuid import UUID
 
 import httpx
-
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -29,6 +30,39 @@ from backend.services.failure_service import (
     stop_multiple_failures,
 )
 
+def calculate_percentile(
+    values: list[float],
+    percentile: float,
+) -> float:
+    """
+    Calculate a percentile using linear interpolation.
+    """
+
+    if not values:
+        return 0.0
+
+    if not 0 <= percentile <= 1:
+        raise ValueError("Percentile must be between 0 and 1")
+
+    sorted_values = sorted(values)
+
+    position = (len(sorted_values) - 1) * percentile
+
+    lower_index = int(position)
+    upper_index = min(
+        lower_index + 1,
+        len(sorted_values) - 1,
+    )
+
+    fraction = position - lower_index
+
+    return float(
+        sorted_values[lower_index]
+        + fraction * (
+            sorted_values[upper_index]
+            - sorted_values[lower_index]
+        )
+    )
 
 # ============================================================
 # EXECUTION CREATION
@@ -77,6 +111,7 @@ async def create_execution(
 async def measure_recovery_time(
     services,
     baseline_services,
+    recovery_start_time: float,
     timeout_seconds: float = 30.0,
     probe_interval_seconds: float = 0.25,
     consecutive_healthy_probes: int = 3,
@@ -84,7 +119,7 @@ async def measure_recovery_time(
     """
     Measures the true recovery time of the system.
 
-    Recovery measurement starts when this function is called.
+    Recovery measurement starts when failure cleanup completes.
 
     A service is considered healthy only when:
 
@@ -110,10 +145,26 @@ async def measure_recovery_time(
     # BASELINE LATENCY
     # --------------------------------------------------------
 
-    baseline_latency = {
+        # --------------------------------------------------------
+    # BASELINE LATENCY
+    # --------------------------------------------------------
+
+    baseline_by_id = {
         service["service_id"]: service["average_latency_ms"]
         for service in baseline_services
+        if service.get("average_latency_ms") is not None
+        and service["average_latency_ms"] > 0
     }
+
+    # Probe only services with valid baseline measurements.
+    services = [
+        service
+        for service in services
+        if service.id in baseline_by_id
+    ]
+
+    if not services:
+        return None
 
     # --------------------------------------------------------
     # CONSECUTIVE HEALTHY PROBE COUNTERS
@@ -128,7 +179,7 @@ async def measure_recovery_time(
     # START TRUE RECOVERY TIMER
     # --------------------------------------------------------
 
-    recovery_start = time.monotonic()
+    recovery_start = recovery_start_time
 
     # --------------------------------------------------------
     # HTTP CLIENT
@@ -171,9 +222,7 @@ async def measure_recovery_time(
                         - request_start
                     ) * 1000
 
-                    baseline_ms = baseline_latency.get(
-                        service.id
-                    )
+                    baseline_ms = baseline_by_id.get(service.id)
 
                     # ----------------------------------------
                     # If there is no baseline measurement,
@@ -358,6 +407,7 @@ async def execute_experiment(
     experiment.started_at = datetime.now()
     experiment.finished_at = None
     experiment.error_message = None
+    experiment.analysis = None
 
     await db.commit()
 
@@ -453,14 +503,17 @@ async def execute_experiment(
         # The failure execution has completed and all failure injectors
         # have been cleaned up. Recovery measurement begins immediately
         # after the failure condition ends.
-        recovery_time_seconds = (
-            await measure_recovery_time(
+        
+        failure_removed_at = failure_output["failure_removed_at_monotonic"]
+
+        if failure_removed_at is not None:
+            recovery_time_seconds = await measure_recovery_time(
                 services=experiment.system.services,
-                baseline_services=baseline_output[
-                    "services"
-                ],
+                baseline_services=baseline_output["services"],
+                recovery_start_time=failure_removed_at,
             )
-        )
+        else:
+            recovery_time_seconds = None
 
         # ====================================================
         # EXECUTION 3 — RECOVERY
@@ -503,16 +556,6 @@ async def execute_experiment(
             await db.commit()
 
             raise
-
-        # ====================================================
-        # EXPERIMENT COMPLETED
-        # ====================================================
-
-        experiment.status = "completed"
-        experiment.finished_at = datetime.now()
-        experiment.error_message = None
-
-        await db.commit()
 
         # ====================================================
         # BUILD COMPLETE EXECUTION RESULT
@@ -589,15 +632,37 @@ async def execute_experiment(
             recovery_time_seconds=recovery_time_seconds,
         )
 
+
+        
         # ====================================================
-        # ADD ANALYSIS
+        # PERSIST ORIGINAL ANALYSIS
         # ====================================================
+
+        analysis = json.loads(
+            json.dumps(
+            analysis,
+            default=str,
+            )
+        )
+
+        print("ANALYSIS TYPE:", type(analysis))
+        print("ANALYSIS EXPERIMENT ID:", type(analysis.get("experiment_id")))
+        print("ANALYSIS DATA:", analysis)
+
+        experiment.analysis = analysis
+
+        experiment.status = "completed"
+        experiment.finished_at = datetime.now()
+
+        print("SAVING ANALYSIS TO DATABASE")
+
+        await db.commit()
 
         experiment_result["analysis"] = analysis
-
         return experiment_result
-    
+
     except asyncio.CancelledError:
+
         experiment.status = "cancelled"
         experiment.error_message = "Experiment cancelled by user"
 
@@ -609,12 +674,8 @@ async def execute_experiment(
             "executions": [],
             "analysis": None,
         }
-    
-    except Exception as e:
 
-        # ----------------------------------------------------
-        # EXPERIMENT FAILED
-        # ----------------------------------------------------
+    except Exception as e:
 
         experiment.status = "failed"
         experiment.finished_at = datetime.now()
@@ -767,7 +828,11 @@ async def _run_experiment(
     # RUN ONE SERVICE
     # ========================================================
 
-    async def run_service_experiment(service):
+    async def run_service_experiment(
+    service,
+    service_total_requests,
+    service_requests_per_second,
+):
 
         # ----------------------------------------------------
         # CHECK WHETHER APPLICATION PROXY IS REQUIRED
@@ -809,13 +874,9 @@ async def _run_experiment(
         workload_results = await generate_workload(
             base_url=workload_base_url,
 
-            total_requests=(
-                experiment.workload.total_requests
-            ),
+            total_requests=service_total_requests,
 
-            requests_per_second=(
-                experiment.workload.requests_per_second
-            ),
+            requests_per_second=service_requests_per_second,
 
             duration_seconds=(
                 experiment.workload.duration_seconds
@@ -834,6 +895,7 @@ async def _run_experiment(
     # ========================================================
 
     execution_start_time = time.monotonic()
+    failure_removed_at_monotonic = None
 
     try:
 
@@ -841,12 +903,58 @@ async def _run_experiment(
         # RUN ALL SERVICES CONCURRENTLY
         # ====================================================
 
-        service_tasks = [
-            asyncio.create_task(
-                run_service_experiment(service)
-            )
+        # Identify services that are dependencies of other services.
+        dependency_service_ids = {
+            dependency.target_service.id
             for service in experiment.system.services
-        ]
+            for dependency in service.outgoing_dependencies
+            if dependency.target_service is not None
+        }
+
+# Send external workload only to entry-point services.
+        entrypoint_services = [
+        service
+        for service in experiment.system.services
+        if service.id not in dependency_service_ids
+    ]
+
+        if not entrypoint_services:
+            raise ValueError(
+            "No entry-point service found. Check dependency configuration."
+        )
+
+        # Distribute the configured workload across entry points.
+        total_requests = experiment.workload.total_requests
+        total_rps = experiment.workload.requests_per_second
+
+        base_requests, remainder = divmod(
+        total_requests,
+        len(entrypoint_services),
+    )
+
+        service_tasks = []
+
+        for index, service in enumerate(entrypoint_services):
+            service_requests = base_requests + (
+            1 if index < remainder else 0
+        )
+
+            if service_requests == 0:
+                continue
+
+            service_rps = total_rps * (
+                service_requests / total_requests
+            )
+
+            service_tasks.append(
+                asyncio.create_task(
+                    run_service_experiment(
+                        service,
+                        service_requests,
+                        service_rps,
+                    )
+                )
+            )
 
         service_results = await asyncio.gather(
             *service_tasks
@@ -863,6 +971,7 @@ async def _run_experiment(
             await stop_multiple_failures(
                 failure_context
             )
+            failure_removed_at_monotonic = time.monotonic()
 
     # ========================================================
     # END EXECUTION TIMER
@@ -909,184 +1018,138 @@ async def _run_experiment(
                 }
             )
 
-    # ========================================================
+        # ========================================================
     # CALCULATE SERVICE-LEVEL RESULTS
     # ========================================================
 
     service_summaries = []
 
     for service_result in service_results:
-
         service = service_result["service"]
-
         workload_results = service_result["results"]
 
-        service_total = len(
-            workload_results
-        )
+        service_total = len(workload_results)
 
-        service_successful = sum(
-            1
-            for result in workload_results
-            if result["success"]
-        )
+        service_successful_results = [
+            item for item in workload_results if item["success"]
+        ]
 
-        service_failed = (
-            service_total
-            - service_successful
-        )
+        service_successful = len(service_successful_results)
+        service_failed = service_total - service_successful
+
+        service_all_latencies = [
+            item["latency"] * 1000 for item in workload_results
+        ]
+
+        service_success_latencies = [
+            item["latency"] * 1000
+            for item in service_successful_results
+        ]
 
         service_average_latency = (
-            sum(
-                result["latency"]
-                for result in workload_results
-            )
-            / service_total
-            if service_total > 0
-            else 0
+            sum(service_all_latencies) / service_total
+            if service_total else 0.0
         )
 
-        service_summaries.append(
-            {
-                "service_id": service.id,
-
-                "service_name": service.name,
-
-                "total_requests": service_total,
-
-                "successful_requests": (
-                    service_successful
-                ),
-
-                "failed_requests": service_failed,
-
-                "average_latency_ms": (
-                    service_average_latency * 1000
-                ),
-            }
+        service_success_average_latency = (
+            sum(service_success_latencies) / len(service_success_latencies)
+            if service_success_latencies else None
         )
 
-    # ========================================================
-    # CALCULATE BASIC COUNTS
-    # ========================================================
-
-    total_requests = len(
-        all_workload_results
-    )
-
-    successful_requests = sum(
-        1
-        for result in all_workload_results
-        if result["success"]
-    )
-
-    failed_requests = (
-        total_requests
-        - successful_requests
-    )
-
-    # ========================================================
-    # CALCULATE AVERAGE LATENCY
-    # ========================================================
-
-    average_latency = (
-        sum(
-            result["latency"]
-            for result in all_workload_results
-        )
-        / total_requests
-        if total_requests > 0
-        else 0
-    )
+        service_summaries.append({
+            "service_id": service.id,
+            "service_name": service.name,
+            "total_requests": service_total,
+            "successful_requests": service_successful,
+            "failed_requests": service_failed,
+            "average_latency_ms": service_average_latency,
+            "successful_average_latency_ms": service_success_average_latency,
+            "successful_p50_latency_ms": (
+                calculate_percentile(service_success_latencies, 0.50)
+                if service_success_latencies else None
+            ),
+            "successful_p95_latency_ms": (
+                calculate_percentile(service_success_latencies, 0.95)
+                if service_success_latencies else None
+            ),
+            "successful_p99_latency_ms": (
+                calculate_percentile(service_success_latencies, 0.99)
+                if service_success_latencies else None
+            ),
+        })
 
     # ========================================================
-    # CREATE LATENCY LIST IN MILLISECONDS
+    # CALCULATE OVERALL REQUEST COUNTS
+    # ========================================================
+
+    total_requests = len(all_workload_results)
+
+    successful_results = [
+        item for item in all_workload_results if item["success"]
+    ]
+
+    successful_requests = len(successful_results)
+    failed_requests = total_requests - successful_requests
+
+    # ========================================================
+    # CALCULATE ALL-REQUEST LATENCY
     # ========================================================
 
     latencies = [
-        result["latency"] * 1000
-        for result in all_workload_results
+        item["latency"] * 1000
+        for item in all_workload_results
     ]
 
-    # ========================================================
-    # P50 LATENCY
-    # ========================================================
+    average_latency = (
+        sum(latencies) / len(latencies)
+        if latencies else 0.0
+    )
 
-    if len(latencies) >= 2:
-
-        p50_latency = statistics.quantiles(
-            latencies,
-            n=100,
-        )[49]
-
-    elif latencies:
-
-        p50_latency = latencies[0]
-
-    else:
-
-        p50_latency = 0
+    p50_latency = calculate_percentile(latencies, 0.50)
+    p95_latency = calculate_percentile(latencies, 0.95)
+    p99_latency = calculate_percentile(latencies, 0.99)
 
     # ========================================================
-    # P95 LATENCY
+    # CALCULATE SUCCESSFUL-REQUEST LATENCY
     # ========================================================
 
-    if len(latencies) >= 2:
+    successful_latencies = [
+        item["latency"] * 1000
+        for item in successful_results
+    ]
 
-        p95_latency = statistics.quantiles(
-            latencies,
-            n=100,
-        )[94]
+    successful_average_latency = (
+        sum(successful_latencies) / len(successful_latencies)
+        if successful_latencies else None
+    )
 
-    elif latencies:
+    successful_p50_latency = (
+        calculate_percentile(successful_latencies, 0.50)
+        if successful_latencies else None
+    )
 
-        p95_latency = latencies[0]
+    successful_p95_latency = (
+        calculate_percentile(successful_latencies, 0.95)
+        if successful_latencies else None
+    )
 
-    else:
-
-        p95_latency = 0
-
-    # ========================================================
-    # P99 LATENCY
-    # ========================================================
-
-    if len(latencies) >= 2:
-
-        p99_latency = statistics.quantiles(
-            latencies,
-            n=100,
-        )[98]
-
-    elif latencies:
-
-        p99_latency = latencies[0]
-
-    else:
-
-        p99_latency = 0
-
-    # ========================================================
-    # SUCCESS RATE
-    # ========================================================
-
-    success_rate = (
-        successful_requests
-        / total_requests
-        * 100
-        if total_requests > 0
-        else 0
+    successful_p99_latency = (
+        calculate_percentile(successful_latencies, 0.99)
+        if successful_latencies else None
     )
 
     # ========================================================
-    # ERROR RATE
+    # SUCCESS RATE AND ERROR RATE
     # ========================================================
 
+    success_rate = (
+        successful_requests / total_requests * 100
+        if total_requests else 0.0
+    )
+
     error_rate = (
-        failed_requests
-        / total_requests
-        * 100
-        if total_requests > 0
-        else 0
+        failed_requests / total_requests * 100
+        if total_requests else 0.0
     )
 
     # ========================================================
@@ -1094,23 +1157,20 @@ async def _run_experiment(
     # ========================================================
 
     throughput = (
-        total_requests
-        / actual_execution_time
-        if actual_execution_time > 0
-        else 0
+        total_requests / actual_execution_time
+        if actual_execution_time > 0 else 0.0
+    )
+
+    successful_throughput = (
+        successful_requests / actual_execution_time
+        if actual_execution_time > 0 else 0.0
     )
 
     # ========================================================
     # AVAILABILITY
     # ========================================================
 
-    availability = (
-        successful_requests
-        / total_requests
-        * 100
-        if total_requests > 0
-        else 0
-    )
+    availability = success_rate
 
     # ========================================================
     # CREATE RESULT
@@ -1118,29 +1178,26 @@ async def _run_experiment(
 
     result = ResultDB(
         execution_id=execution.id,
-
         total_requests=total_requests,
-
         successful_requests=successful_requests,
-
         failed_requests=failed_requests,
-
         success_rate=success_rate,
-
         error_rate=error_rate,
 
-        average_latency_ms=(
-            average_latency * 1000
-        ),
-
+        # All-request latency
+        average_latency_ms=average_latency,
         p50_latency_ms=p50_latency,
-
         p95_latency_ms=p95_latency,
-
         p99_latency_ms=p99_latency,
 
-        throughput=throughput,
+        # Successful-request latency
+        successful_average_latency_ms=successful_average_latency,
+        successful_p50_latency_ms=successful_p50_latency,
+        successful_p95_latency_ms=successful_p95_latency,
+        successful_p99_latency_ms=successful_p99_latency,
 
+        throughput=throughput,
+        successful_throughput=successful_throughput,
         availability=availability,
     )
 
@@ -1160,4 +1217,6 @@ async def _run_experiment(
         "execution": execution,
         "result": result,
         "services": service_summaries,
+        "failure_removed_at_monotonic": failure_removed_at_monotonic,
     }
+

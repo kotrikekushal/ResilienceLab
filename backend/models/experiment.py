@@ -1,10 +1,12 @@
+
 from datetime import datetime
+from typing import Any
 from uuid import UUID
-from typing import Any
+
 from pydantic import BaseModel, ConfigDict
-from backend.models.experiment_run import ServiceResultResponse
+
 from backend.models.result import ResultResponse
-from typing import Any
+
 
 class ExperimentCreate(BaseModel):
     system_id: UUID
@@ -19,7 +21,7 @@ class ExperimentUpdate(BaseModel):
     status: str | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
-    error_message: str | None  = None
+    error_message: str | None = None
     hypothesis: dict[str, Any] | None = None
 
 
@@ -38,25 +40,6 @@ class ExperimentResponse(BaseModel):
     result: ResultResponse | None = None
     hypothesis: dict[str, Any] | None = None
 
-class ExecutionResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: UUID
-    experiment_id: UUID
-    run_number: int
-    run_type: str
-    status: str
-    started_at: datetime | None
-    finished_at: datetime | None
-    error_message: str | None
-    created_at: datetime
-    result: ResultResponse | None
-    services: list[ServiceResultResponse]
-
-class ExperimentRunResponse(BaseModel):
-    experiment_id: UUID
-    status: str
-    executions: list[ExecutionResponse]
 
 class ExperimentCloneRequest(BaseModel):
     name: str | None = None
@@ -68,6 +51,7 @@ class ExperimentReuseRequest(BaseModel):
     description: str | None = None
     workload_overrides: dict[str, Any] | None = None
     failure_overrides: list[dict[str, Any]] | None = None
+
 
 class ConfigurationServiceResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
