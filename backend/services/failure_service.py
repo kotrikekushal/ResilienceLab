@@ -44,6 +44,11 @@ INFRASTRUCTURE_FAILURE_TYPES = {
 DEPENDENCY_FAILURE_TYPE = "dependency_error"
 
 
+
+import time
+from dataclasses import dataclass, field
+
+
 @dataclass
 class FailureExecutionContext:
     application_failures: list[tuple[str, str]] = field(
@@ -55,6 +60,24 @@ class FailureExecutionContext:
     infrastructure_tasks: list[asyncio.Task] = field(
         default_factory=list
     )
+
+    failure_deadlines: list[float] = field(
+        default_factory=list
+    )
+
+    failure_activation_times: list[float] = field(
+        default_factory=list
+    )
+
+    cleanup_completed_at: float | None = None
+
+    @property
+    def expected_failure_removal_at(self) -> float | None:
+        if not self.failure_deadlines:
+            return None
+
+        return max(self.failure_deadlines)
+
 
 
 async def start_multiple_failures(
@@ -106,6 +129,12 @@ async def start_multiple_failures(
                 if failure.duration_seconds is not None
                 else default_duration_seconds
             )
+            
+            if duration_seconds <= 0:
+                raise ValueError(
+                    f"Failure '{failure.id}' must have "
+                    "a positive duration"
+                )
 
             # ------------------------------------------------
             # APPLICATION FAILURE
@@ -132,7 +161,14 @@ async def start_multiple_failures(
                         f"{response.status_code} "
                         f"{response.text}"
                     )
+                activated_at = time.monotonic()
+                context.failure_activation_times.append(
+                    activated_at
+                )
 
+                context.failure_deadlines.append(
+                activated_at + duration_seconds
+                )
                 # Track each service only once because the
                 # DELETE endpoint clears all application failures
                 # for that service.
@@ -191,6 +227,9 @@ async def start_multiple_failures(
                 context.dependency_failures.append(
                     dependency_control_url
                 )
+                activated_at = time.monotonic()
+                context.failure_activation_times.append(activated_at)
+                context.failure_deadlines.append(activated_at + duration_seconds)
 
                 continue
 
@@ -219,6 +258,9 @@ async def start_multiple_failures(
                 )
 
                 infrastructure_tasks.extend(task)
+                activated_at = time.monotonic()
+                context.failure_activation_times.append(activated_at)
+                context.failure_deadlines.append(activated_at + duration_seconds)
 
                 continue
 
@@ -480,7 +522,7 @@ async def stop_multiple_failures(
                 )
             ):
                 errors.append(result)
-
+    context.cleanup_completed_at = time.monotonic()
     _clear_context(context)
 
     if errors:

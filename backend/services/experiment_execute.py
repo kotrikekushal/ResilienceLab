@@ -112,6 +112,7 @@ async def measure_recovery_time(
     services,
     baseline_services,
     recovery_start_time: float,
+    application_failure_service_ids: set | None = None,
     timeout_seconds: float = 30.0,
     probe_interval_seconds: float = 0.25,
     consecutive_healthy_probes: int = 3,
@@ -213,8 +214,30 @@ async def measure_recovery_time(
 
                 try:
 
-                    response = await client.get(
-                        service.base_url
+                    if (
+                        application_failure_service_ids
+                        and service.id in application_failure_service_ids
+                    ):
+                        application_proxy_url = os.getenv(
+                            "APPLICATION_FAILURE_PROXY_URL",
+                            "http://application-failure-proxy:8002",
+                        ).rstrip("/")
+
+                        probe_url = (
+                            f"{application_proxy_url}"
+                            f"/proxy/{service.name}/"
+                        )
+
+                        response = await client.get(
+                        probe_url,
+                        headers={
+                            "X-Resilience-Target-URL": service.base_url
+                        },
+                    )
+
+                    else:
+                        response = await client.get(
+                            service.base_url
                     )
 
                     latency_ms = (
@@ -505,15 +528,26 @@ async def execute_experiment(
         # after the failure condition ends.
         
         failure_removed_at = failure_output["failure_removed_at_monotonic"]
+        recovery_time_seconds = None
 
         if failure_removed_at is not None:
+            application_failure_service_ids = {
+                failure.service_id
+                for failure in experiment.failures
+                if failure.failure_type in APPLICATION_FAILURE_TYPES
+            }
+
             recovery_time_seconds = await measure_recovery_time(
                 services=experiment.system.services,
                 baseline_services=baseline_output["services"],
                 recovery_start_time=failure_removed_at,
+                application_failure_service_ids=application_failure_service_ids,
             )
         else:
-            recovery_time_seconds = None
+            print(
+                "RECOVERY TIME NOT MEASURED: "
+                "Failure cleanup timestamp is missing."
+            )
 
         # ====================================================
         # EXECUTION 3 — RECOVERY
@@ -871,39 +905,38 @@ async def _run_experiment(
         # RUN WORKLOAD
         # ----------------------------------------------------
 
-        workload_results = await generate_workload(
+        
+        workload_run = await generate_workload(
             base_url=workload_base_url,
-
             total_requests=service_total_requests,
-
             requests_per_second=service_requests_per_second,
-
-            duration_seconds=(
-                experiment.workload.duration_seconds
-            ),
-
+            duration_seconds=experiment.workload.duration_seconds,
             target_url=target_url,
+            max_concurrency=100,
         )
 
         return {
             "service": service,
-            "results": workload_results,
+            "workload": workload_run,
+            "results": workload_run["requests"],
         }
+
 
     # ========================================================
     # START EXECUTION TIMER
     # ========================================================
 
-    execution_start_time = time.monotonic()
+    
+    # ========================================================
+    # RUN ALL ENTRY-POINT SERVICES
+    # ========================================================
+
     failure_removed_at_monotonic = None
+    workload_start_time = time.monotonic()
+    workload_end_time = None
+    service_results = []
 
     try:
-
-        # ====================================================
-        # RUN ALL SERVICES CONCURRENTLY
-        # ====================================================
-
-        # Identify services that are dependencies of other services.
         dependency_service_ids = {
             dependency.target_service.id
             for service in experiment.system.services
@@ -911,33 +944,32 @@ async def _run_experiment(
             if dependency.target_service is not None
         }
 
-# Send external workload only to entry-point services.
         entrypoint_services = [
-        service
-        for service in experiment.system.services
-        if service.id not in dependency_service_ids
-    ]
+            service
+            for service in experiment.system.services
+            if service.id not in dependency_service_ids
+        ]
 
         if not entrypoint_services:
             raise ValueError(
-            "No entry-point service found. Check dependency configuration."
-        )
+                "No entry-point service found. "
+                "Check dependency configuration."
+            )
 
-        # Distribute the configured workload across entry points.
         total_requests = experiment.workload.total_requests
         total_rps = experiment.workload.requests_per_second
 
         base_requests, remainder = divmod(
-        total_requests,
-        len(entrypoint_services),
-    )
+            total_requests,
+            len(entrypoint_services),
+        )
 
         service_tasks = []
 
         for index, service in enumerate(entrypoint_services):
             service_requests = base_requests + (
-            1 if index < remainder else 0
-        )
+                1 if index < remainder else 0
+            )
 
             if service_requests == 0:
                 continue
@@ -956,32 +988,26 @@ async def _run_experiment(
                 )
             )
 
-        service_results = await asyncio.gather(
-            *service_tasks
-        )
+        service_results = await asyncio.gather(*service_tasks)
+
+        workload_end_time = time.monotonic()
 
     finally:
-
-        # ====================================================
-        # STOP ALL FAILURES
-        # ====================================================
+        # Workload timing ends before failure cleanup.
+        if workload_end_time is None:
+            workload_end_time = time.monotonic()
 
         if failure_context is not None:
-
-            await stop_multiple_failures(
-                failure_context
+            try:
+                await stop_multiple_failures(failure_context)
+            finally:
+                failure_removed_at_monotonic = (
+                    failure_context.cleanup_completed_at
             )
-            failure_removed_at_monotonic = time.monotonic()
 
-    # ========================================================
-    # END EXECUTION TIMER
-    # ========================================================
-
-    execution_end_time = time.monotonic()
-
-    actual_execution_time = (
-        execution_end_time
-        - execution_start_time
+    actual_workload_duration = max(
+        workload_end_time - workload_start_time,
+        0.000001,
     )
 
     # ========================================================
@@ -1156,15 +1182,13 @@ async def _run_experiment(
     # THROUGHPUT
     # ========================================================
 
-    throughput = (
-        total_requests / actual_execution_time
-        if actual_execution_time > 0 else 0.0
-    )
+    
+    throughput = total_requests / actual_workload_duration
 
     successful_throughput = (
-        successful_requests / actual_execution_time
-        if actual_execution_time > 0 else 0.0
+        successful_requests / actual_workload_duration
     )
+
 
     # ========================================================
     # AVAILABILITY
@@ -1213,10 +1237,18 @@ async def _run_experiment(
     # RETURN EXECUTION RESULT
     # ========================================================
 
+    
     return {
         "execution": execution,
         "result": result,
         "services": service_summaries,
         "failure_removed_at_monotonic": failure_removed_at_monotonic,
+        "actual_workload_duration_seconds": actual_workload_duration,
+        "configured_workload_duration_seconds": (
+            experiment.workload.duration_seconds
+        ),
+        "configured_total_requests": experiment.workload.total_requests,
+        "attempted_total_requests": total_requests,
     }
+
 

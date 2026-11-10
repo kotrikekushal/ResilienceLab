@@ -107,17 +107,13 @@ def _calculate_failure_resistance(
     failure: dict,
 ) -> dict:
     """
-    Calculates how well the system resisted the injected failure.
+    Measures how well the system resists injected failures.
 
-    Current weighting:
-
-    Success rate      40%
-    Latency           35%
-    Throughput        25%
-
-    Availability is intentionally not included separately because
-    the current instrumentation derives availability from successful
-    requests. Including it would double-count the same signal.
+    Weights:
+        Success rate          40%
+        Average latency       20%
+        P95 latency           15%
+        Successful throughput 25%
     """
 
     success_score = _retention_score(
@@ -125,38 +121,41 @@ def _calculate_failure_resistance(
         failure["success_rate"],
     )
 
-    latency_score = _latency_score(
+    average_latency_score = _latency_score(
         baseline["average_latency_ms"],
         failure["average_latency_ms"],
     )
 
+    p95_latency_score = _latency_score(
+        baseline["p95_latency_ms"],
+        failure["p95_latency_ms"],
+    )
+
     throughput_score = _retention_score(
-        baseline["throughput"],
-        failure["throughput"],
+        baseline["successful_throughput"],
+        failure["successful_throughput"],
     )
 
     failure_resistance = (
         success_score * 0.40
-        + latency_score * 0.35
+        + average_latency_score * 0.20
+        + p95_latency_score * 0.15
         + throughput_score * 0.25
     )
 
     return {
-        "success_score": round(
-            success_score,
-            2,
+        "success_score": round(success_score, 2),
+        "average_latency_score": round(
+            average_latency_score, 2
         ),
-        "latency_score": round(
-            latency_score,
-            2,
+        "p95_latency_score": round(
+            p95_latency_score, 2
         ),
-        "throughput_score": round(
-            throughput_score,
-            2,
+        "successful_throughput_score": round(
+            throughput_score, 2
         ),
         "failure_resistance_score": round(
-            failure_resistance,
-            2,
+            failure_resistance, 2
         ),
     }
 
@@ -166,14 +165,13 @@ def _calculate_recovery_score(
     recovery: dict,
 ) -> dict:
     """
-    Calculates how completely the system returned toward
-    baseline behavior after the failure condition ended.
+    Measures how completely the system returned to baseline.
 
-    Current weighting:
-
-    Success rate      45%
-    Latency           35%
-    Throughput        20%
+    Weights:
+        Success rate          40%
+        Average latency       20%
+        P95 latency           20%
+        Successful throughput 20%
     """
 
     success_score = _recovery_metric_score(
@@ -181,41 +179,41 @@ def _calculate_recovery_score(
         recovery["success_rate"],
     )
 
-    latency_score = _latency_recovery_score(
+    average_latency_score = _latency_recovery_score(
         baseline["average_latency_ms"],
         recovery["average_latency_ms"],
     )
 
+    p95_latency_score = _latency_recovery_score(
+        baseline["p95_latency_ms"],
+        recovery["p95_latency_ms"],
+    )
+
     throughput_score = _recovery_metric_score(
-        baseline["throughput"],
-        recovery["throughput"],
+        baseline["successful_throughput"],
+        recovery["successful_throughput"],
     )
 
     recovery_score = (
-        success_score * 0.45
-        + latency_score * 0.35
+        success_score * 0.40
+        + average_latency_score * 0.20
+        + p95_latency_score * 0.20
         + throughput_score * 0.20
     )
 
     return {
-        "success_score": round(
-            success_score,
-            2,
+        "success_score": round(success_score, 2),
+        "average_latency_score": round(
+            average_latency_score, 2
         ),
-        "latency_score": round(
-            latency_score,
-            2,
+        "p95_latency_score": round(
+            p95_latency_score, 2
         ),
-        "throughput_score": round(
-            throughput_score,
-            2,
+        "successful_throughput_score": round(
+            throughput_score, 2
         ),
-        "recovery_score": round(
-            recovery_score,
-            2,
-        ),
+        "recovery_score": round(recovery_score, 2),
     }
-
 
 def _calculate_resilience_score(
     failure_resistance_score: float,
@@ -261,84 +259,88 @@ def _calculate_degradation(
     failure: dict,
 ) -> dict:
     """
-    Calculates measurable degradation between baseline
-    and failure executions.
+    Calculates degradation between baseline and failure phases.
     """
 
-    success_rate_drop = (
-        baseline["success_rate"]
-        - failure["success_rate"]
-    )
+    def percentage_increase(
+        baseline_value: float,
+        current_value: float,
+    ) -> float:
+        if baseline_value <= 0:
+            return 0.0
 
-    error_rate_increase = (
-        failure["error_rate"]
-        - baseline["error_rate"]
-    )
-
-    latency_increase_percentage = (
-        (
-            (
-                failure["average_latency_ms"]
-                - baseline["average_latency_ms"]
-            )
-            / baseline["average_latency_ms"]
+        return max(
+            0.0,
+            ((current_value - baseline_value) / baseline_value)
+            * 100,
         )
-        * 100
-        if baseline["average_latency_ms"] > 0
-        else 0.0
-    )
 
-    throughput_decrease_percentage = (
-        (
-            (
-                baseline["throughput"]
-                - failure["throughput"]
-            )
-            / baseline["throughput"]
+    def percentage_decrease(
+        baseline_value: float,
+        current_value: float,
+    ) -> float:
+        if baseline_value <= 0:
+            return 0.0
+
+        return max(
+            0.0,
+            ((baseline_value - current_value) / baseline_value)
+            * 100,
         )
-        * 100
-        if baseline["throughput"] > 0
-        else 0.0
-    )
-
-    availability_drop = (
-        baseline["availability"]
-        - failure["availability"]
-    )
 
     return {
         "success_rate_drop_percentage_points": round(
             max(
                 0.0,
-                success_rate_drop,
+                baseline["success_rate"] - failure["success_rate"],
             ),
             2,
         ),
+
         "error_rate_increase_percentage_points": round(
             max(
                 0.0,
-                error_rate_increase,
+                failure["error_rate"] - baseline["error_rate"],
             ),
             2,
         ),
+
         "latency_increase_percentage": round(
-            max(
-                0.0,
-                latency_increase_percentage,
+            percentage_increase(
+                baseline["average_latency_ms"],
+                failure["average_latency_ms"],
             ),
             2,
         ),
+
+        "p95_latency_increase_percentage": round(
+            percentage_increase(
+                baseline["p95_latency_ms"],
+                failure["p95_latency_ms"],
+            ),
+            2,
+        ),
+
         "throughput_decrease_percentage": round(
-            max(
-                0.0,
-                throughput_decrease_percentage,
+            percentage_decrease(
+                baseline["throughput"],
+                failure["throughput"],
             ),
             2,
         ),
+
+        "successful_throughput_decrease_percentage": round(
+            percentage_decrease(
+                baseline["successful_throughput"],
+                failure["successful_throughput"],
+            ),
+            2,
+        ),
+
         "availability_drop_percentage_points": round(
             max(
                 0.0,
-                availability_drop,
+                baseline["availability"] - failure["availability"],
             ),
             2,
         ),
@@ -350,17 +352,14 @@ def _determine_recovery(
     recovery: dict,
 ) -> dict:
     """
-    Determines whether recovery returned the system
-    sufficiently close to baseline.
+    Determines whether recovery returned sufficiently close
+    to baseline.
 
     Thresholds:
-
-    Success rate  >= 95% of baseline
-    Latency       <= 125% of baseline OR baseline + 5 ms
-    Throughput    >= 95% of baseline
-
-    The absolute latency floor prevents small normal measurement
-    fluctuations from being incorrectly classified as non-recovery.
+        Success rate          >= 95% of baseline
+        Average latency       <= 125% of baseline OR baseline + 5 ms
+        P95 latency           <= 125% of baseline OR baseline + 5 ms
+        Successful throughput >= 95% of baseline
     """
 
     success_recovered = (
@@ -368,35 +367,48 @@ def _determine_recovery(
         >= baseline["success_rate"] * 0.95
     )
 
-    baseline_latency_ms = baseline["average_latency_ms"]
-    latency_limit_ms = max(
-        baseline_latency_ms * 1.25,
-        baseline_latency_ms + 5.0,
+    average_latency_limit = max(
+        baseline["average_latency_ms"] * 1.25,
+        baseline["average_latency_ms"] + 5.0,
     )
 
-    latency_recovered = (
+    average_latency_recovered = (
         recovery["average_latency_ms"]
-        <= latency_limit_ms
+        <= average_latency_limit
     )
 
-    throughput_recovered = (
-        recovery["throughput"]
-        >= baseline["throughput"] * 0.95
+    p95_latency_limit = max(
+        baseline["p95_latency_ms"] * 1.25,
+        baseline["p95_latency_ms"] + 5.0,
+    )
+
+    p95_latency_recovered = (
+        recovery["p95_latency_ms"]
+        <= p95_latency_limit
+    )
+
+    successful_throughput_recovered = (
+        recovery["successful_throughput"]
+        >= baseline["successful_throughput"] * 0.95
     )
 
     recovered = (
         success_recovered
-        and latency_recovered
-        and throughput_recovered
+        and average_latency_recovered
+        and p95_latency_recovered
+        and successful_throughput_recovered
     )
 
     return {
-        "recovered": recovered,
-        "success_rate_recovered": success_recovered,
-        "latency_recovered": latency_recovered,
-        "throughput_recovered": throughput_recovered,
-    }
-
+    "recovered": recovered,
+    "success_rate_recovered": success_recovered,
+    "latency_recovered": average_latency_recovered,
+    "p95_latency_recovered": p95_latency_recovered,
+    "throughput_recovered": successful_throughput_recovered,
+    "successful_throughput_recovered": (
+        successful_throughput_recovered
+    ),
+}
 
 def _calculate_recovery_time(
     failure_execution: dict,
@@ -725,121 +737,91 @@ def _generate_recommendations(
     service_impacts: list[dict],
 ) -> list[str]:
     """
-    Generates recommendations based on measured degradation
+    Generates recommendations from measured degradation
     and recovery behavior.
     """
 
     recommendations = []
 
-    # ------------------------------------------------------------
-    # AVAILABILITY / SUCCESS
-    # ------------------------------------------------------------
-
-    if (
-        degradation[
-            "success_rate_drop_percentage_points"
-        ] > 10
-    ):
+    # Success rate
+    if degradation["success_rate_drop_percentage_points"] > 10:
         recommendations.append(
-            "Improve fault handling, fallback "
-            "mechanisms, graceful degradation, "
-            "and error isolation."
+            "Improve fault handling, fallback mechanisms, "
+            "graceful degradation, and error isolation."
         )
 
-    # ------------------------------------------------------------
-    # LATENCY
-    # ------------------------------------------------------------
-
+    # Average and tail latency
     if (
-        degradation[
-            "latency_increase_percentage"
-        ] > 50
+        degradation["latency_increase_percentage"] > 50
+        or degradation["p95_latency_increase_percentage"] > 50
     ):
         recommendations.append(
-            "Investigate latency bottlenecks, "
-            "dependency delays, timeout handling, "
-            "queueing, and resource contention."
+            "Investigate latency bottlenecks, dependency delays, "
+            "timeout handling, queueing, and resource contention. "
+            "Pay particular attention to high-percentile latency."
         )
 
-    # ------------------------------------------------------------
-    # THROUGHPUT
-    # ------------------------------------------------------------
-
+    # Successful throughput
     if (
-        degradation[
-            "throughput_decrease_percentage"
-        ] > 20
+        degradation["successful_throughput_decrease_percentage"] > 20
     ):
         recommendations.append(
-            "Improve concurrency handling, "
-            "capacity planning, backpressure, "
-            "and resource utilization."
+            "Improve successful request processing through "
+            "better concurrency handling, capacity planning, "
+            "backpressure, and fault isolation."
         )
 
-    # ------------------------------------------------------------
-    # AVAILABILITY
-    # ------------------------------------------------------------
-
-    if (
-        degradation[
-            "availability_drop_percentage_points"
-        ] > 10
-    ):
+    # Total throughput
+    if degradation["throughput_decrease_percentage"] > 20:
         recommendations.append(
-            "Strengthen redundancy, failover, "
-            "health checks, and service isolation."
+            "Investigate overall request-processing capacity "
+            "and potential throughput bottlenecks."
         )
 
-    # ------------------------------------------------------------
-    # RECOVERY
-    # ------------------------------------------------------------
+    # Availability
+    if degradation["availability_drop_percentage_points"] > 10:
+        recommendations.append(
+            "Strengthen redundancy, failover, health checks, "
+            "and service isolation."
+        )
 
+    # Recovery
     if not recovery["recovered"]:
         recommendations.append(
-            "Improve recovery mechanisms because "
-            "the system did not return within the "
+            "Improve recovery mechanisms because one or more "
+            "performance metrics did not return within the "
             "defined recovery thresholds."
         )
 
-    # ------------------------------------------------------------
-    # SERVICE IMPACT
-    # ------------------------------------------------------------
-
+    # Service impact
     critical_services = [
-        service
-        for service in service_impacts
+        service for service in service_impacts
         if service["impact"] == "critical"
     ]
 
     high_services = [
-        service
-        for service in service_impacts
+        service for service in service_impacts
         if service["impact"] == "high"
     ]
 
     if critical_services:
         recommendations.append(
-            "Prioritize critically affected services "
-            "and strengthen their fault isolation, "
-            "dependency resilience, and recovery paths."
+            "Prioritize critically affected services and strengthen "
+            "their fault isolation, dependency resilience, "
+            "and recovery paths."
         )
 
     elif high_services:
         recommendations.append(
-            "Prioritize highly affected services "
-            "and investigate their latency, "
-            "dependency behavior, and fault handling."
+            "Prioritize highly affected services and investigate "
+            "their latency, dependency behavior, and fault handling."
         )
-
-    # ------------------------------------------------------------
-    # NO MAJOR ISSUES
-    # ------------------------------------------------------------
 
     if not recommendations:
         recommendations.append(
-            "The system maintained strong performance "
-            "and recovered within the defined resilience "
-            "thresholds under the tested failure condition."
+            "The system maintained strong performance and recovered "
+            "within the defined resilience thresholds under the "
+            "tested failure conditions."
         )
 
     return recommendations
